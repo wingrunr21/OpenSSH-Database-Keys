@@ -1421,6 +1421,35 @@ AC_ARG_WITH([audit],
 	esac ]
 )
 
+MYSQL_KEYS_MSG="no"
+AC_ARG_WITH(mysql-keys,
+	[  --with-mysql-keys[[=PATH]]     Enable MySQL key lookups (optionally with PATH)],
+	[
+		if test "x$withval" != "xno" ; then
+			if test "x$withval" != "xyes" ; then
+				CPPFLAGS="$CPPFLAGS -I${withval}/include"
+				LDFLAGS="$LDFLAGS -L${withval}/lib"
+			fi
+			
+			AC_DEFINE([WITH_MYSQL_KEYS], 1, [Enable MySQL pubkey support])
+			LIBS="-lmysqlclient $LIBS"
+			MYSQL_KEYS_MSG="yes"
+			
+			AC_MSG_CHECKING([for MySQL support])
+			AC_TRY_COMPILE(
+				[#include <mysql/mysql.h>
+				 #include <stdlib.h>],
+				[(void)mysql_init(NULL);],
+				[AC_MSG_RESULT(yes)],
+				[
+				 AC_MSG_RESULT(no)
+				 AC_MSG_ERROR([** Incomplete or missing MySQL libraries **])
+				]
+			)
+		fi
+	]
+)
+
 dnl    Checks for library functions. Please keep in alphabetical order
 AC_CHECK_FUNCS([ \
 	arc4random \
@@ -4235,6 +4264,7 @@ echo "                   SELinux support: $SELINUX_MSG"
 echo "                 Smartcard support: $SCARD_MSG"
 echo "                     S/KEY support: $SKEY_MSG"
 echo "              TCP Wrappers support: $TCPW_MSG"
+echo "            MySQL keystore support: $MYSQL_KEYS_MSG"
 echo "              MD5 password support: $MD5_MSG"
 echo "                   libedit support: $LIBEDIT_MSG"
 echo "  Solaris process contract support: $SPC_MSG"

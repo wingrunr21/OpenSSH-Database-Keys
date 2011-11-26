@@ -16,6 +16,10 @@
 #ifndef SERVCONF_H
 #define SERVCONF_H
 
+#ifdef WITH_MYSQL_KEYS
+#include <mysql/mysql.h>
+#endif
+
 #define MAX_PORTS		256	/* Max # ports. */
 
 #define MAX_ALLOW_USERS		256	/* Max # users on allow list. */
@@ -166,6 +170,14 @@ typedef struct {
 	char   *revoked_keys_file;
 	char   *trusted_user_ca_keys;
 	char   *authorized_principals_file;
+#ifdef WITH_MYSQL_KEYS
+  int     mysql_enabled;
+  char   *mysql_dbhost;
+  char   *mysql_dbuser;
+  char   *mysql_dbpass;
+  char   *mysql_dbname;
+  MYSQL  *mysql_handle;
+#endif
 }       ServerOptions;
 
 /*

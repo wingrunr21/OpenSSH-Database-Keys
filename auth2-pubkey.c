@@ -59,6 +59,11 @@
 #include "authfile.h"
 #include "match.h"
 
+#ifdef WITH_MYSQL_KEYS
+#include <string.h>
+#include "mysql-keys.h"
+#endif
+
 /* import */
 extern ServerOptions options;
 extern u_char *session_id2;
@@ -266,8 +271,73 @@ user_key_allowed2(struct passwd *pw, Key *key, char *file)
 	Key *found;
 	char *fp;
 
+#ifdef WITH_MYSQL_KEYS
+	mysql_key_t *my_keys;
+	unsigned int i = 0;
+#endif
+
 	/* Temporarily use the user's uid. */
 	temporarily_use_uid(pw);
+
+#ifdef WITH_MYSQL_KEYS
+	if (options.mysql_enabled) {
+		found_key = 0;
+		found = key_new(key->type);
+
+		debug("[MyK] looking for a key for uid=%s in MySQL", pw->pw_name);
+		my_keys = mysql_keys_search(&options, key, pw->pw_name);
+		if (!(my_keys[0].key)) {
+			fp = key_fingerprint(key, SSH_FP_MD5, SSH_FP_HEX);
+			logit("[MyK] no keys found for uid=%s and key fingerprint %s", pw->pw_name, fp);
+			xfree(fp);
+		}
+
+		for (i = 0; !found_key && my_keys[i].key; i++) {
+			char *cp;
+
+			cp = my_keys[i].key;
+			if (key_read(found, &cp) != 1) {
+				debug("[MyK] user_key_allowed2: invalid key string %s", my_keys[i].key);
+				continue;
+			}
+
+			/* Copy the key options into a separate buffer that ends with a space,
+			 * otherwise auth_parse_options gets all shirty, because it expects
+			 * the options to be part of a key, not all out on their own, and
+			 * doesn't like a \0-terminated option string.
+			 */
+			if (my_keys[i].options) {
+				int sl;
+				sl = strlen(my_keys[i].options);
+				cp = xmalloc(sl + 2);
+				if (snprintf(cp, sl + 2, "%s ", my_keys[i].options) >= sl + 2) {
+					fatal("Can't happen: snprintf for key options overran buffer!");
+				}
+			} else {
+				cp = NULL;
+			}
+			if (key_equal(found, key) &&
+				auth_parse_options(pw, cp, file, linenum) == 1) {
+					found_key = 1;
+					fp = key_fingerprint(found, SSH_FP_MD5, SSH_FP_HEX);
+					verbose("[MyK] Found matching %s key: %s", key_type(found), fp);
+
+					xfree(fp);
+			}
+			if (cp) {
+				xfree(cp);
+			}
+		}
+
+		mysql_keys_free(my_keys);
+		key_free(found);
+
+		if (found_key) {
+			restore_uid();
+			return found_key;
+		}
+	}
+#endif /* WITH_MYSQL_KEYS */
 
 	debug("trying public key file %s", file);
 	f = auth_openkeyfile(file, pw, options.strict_modes);

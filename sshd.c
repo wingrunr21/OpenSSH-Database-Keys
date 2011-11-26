@@ -128,6 +128,10 @@ int allow_severity;
 int deny_severity;
 #endif /* LIBWRAP */
 
+#ifdef WITH_MYSQL_KEYS
+#include <mysql-keys.h>
+#endif
+
 #ifndef O_NOCTTY
 #define O_NOCTTY	0
 #endif

@@ -46,6 +46,10 @@
 #include "channels.h"
 #include "groupaccess.h"
 
+#ifdef WITH_MYSQL_KEYS
+#include "mysql-keys.h"
+#endif
+
 static void add_listen_addr(ServerOptions *, char *, int);
 static void add_one_listen_addr(ServerOptions *, char *, int);
 
@@ -138,6 +142,14 @@ initialize_server_options(ServerOptions *options)
 	options->authorized_principals_file = NULL;
 	options->ip_qos_interactive = -1;
 	options->ip_qos_bulk = -1;
+#ifdef WITH_MYSQL_KEYS
+  options->mysql_enabled = -1;
+  options->mysql_dbhost = NULL;
+  options->mysql_dbuser = NULL;
+  options->mysql_dbpass = NULL;
+  options->mysql_dbname = NULL;
+  options->mysql_handle = NULL;
+#endif
 }
 
 void
@@ -291,6 +303,21 @@ fill_default_server_options(ServerOptions *options)
 	}
 #endif
 
+#ifdef WITH_MYSQL_KEYS
+  if (options->mysql_enabled == -1)
+    options->mysql_enabled = 0;
+  if (options->mysql_enabled == 1
+      && (!options->mysql_dbhost
+      || !options->mysql_dbuser
+      || !options->mysql_dbpass
+      || !options->mysql_dbname
+      )
+  ) {
+    logit("You asked for MySQL, but didn't specify all the options. No MySQL for you! One year!");
+    options->mysql_enabled = 0;
+  }
+#endif
+
 }
 
 /* Keyword tokens. */
@@ -325,6 +352,10 @@ typedef enum {
 	sRevokedKeys, sTrustedUserCAKeys, sAuthorizedPrincipalsFile,
 	sKexAlgorithms, sIPQoS,
 	sDeprecated, sUnsupported
+#ifdef WITH_MYSQL_KEYS
+ , sUseMySQL, sMySQLServer, sMySQLUsername,
+ sMySQLPassword, sMySQLDatabase
+#endif
 } ServerOpCodes;
 
 #define SSHCFG_GLOBAL	0x01	/* allowed in main section of sshd_config */
@@ -448,6 +479,13 @@ static struct {
 	{ "authorizedprincipalsfile", sAuthorizedPrincipalsFile, SSHCFG_ALL },
 	{ "kexalgorithms", sKexAlgorithms, SSHCFG_GLOBAL },
 	{ "ipqos", sIPQoS, SSHCFG_ALL },
+#ifdef WITH_MYSQL_KEYS
+  { "UseMySQL", sUseMySQL, SSHCFG_GLOBAL },
+  { "MySQLServer", sMySQLServer, SSHCFG_GLOBAL },
+  { "MySQLUsername", sMySQLUsername, SSHCFG_GLOBAL },
+  { "MySQLPassword", sMySQLPassword, SSHCFG_GLOBAL },
+  { "MySQLDatabase", sMySQLDatabase, SSHCFG_GLOBAL },
+#endif
 	{ NULL, sBadOption, 0 }
 };
 
@@ -1408,6 +1446,44 @@ process_server_config_line(ServerOptions *options, char *line,
 		while (arg)
 		    arg = strdelim(&cp);
 		break;
+
+#ifdef WITH_MYSQL_KEYS
+  case sUseMySQL:
+    intptr = &options->mysql_enabled;
+    goto parse_flag;
+
+  case sMySQLServer:
+    arg = cp;
+    if (!arg || *arg == '\0')
+      fatal("%s line %d: missing MySQL server name", filename, linenum);
+    options->mysql_dbhost = xstrdup(arg);
+    memset(arg, 0, strlen(arg));
+    break;
+
+  case sMySQLUsername:
+    arg = cp;
+    if (!arg || *arg == '\0')
+      fatal("%s line %d: missing MySQL username", filename, linenum);
+    options->mysql_dbuser = xstrdup(arg);
+    memset(arg, 0, strlen(arg));
+    break;
+
+  case sMySQLPassword:
+    arg = cp;
+    if (!arg || *arg == '\0')
+      fatal("%s line %d: missing MySQL password", filename, linenum);
+    options->mysql_dbpass = xstrdup(arg);
+    memset(arg, 0, strlen(arg));
+    break;
+
+  case sMySQLDatabase:
+    arg = cp;
+    if (!arg || *arg == '\0')
+      fatal("%s line %d: missing MySQL database name", filename, linenum);
+    options->mysql_dbname = xstrdup(arg);
+    memset(arg, 0, strlen(arg));
+    break;
+#endif /* WITH_MYSQL_KEYS */
 
 	default:
 		fatal("%s line %d: Missing handler for opcode %s (%d)",

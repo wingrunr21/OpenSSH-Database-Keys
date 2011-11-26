@@ -596,6 +596,9 @@
 /* Define to 1 if you have the <linux/if_tun.h> header file. */
 #undef HAVE_LINUX_IF_TUN_H
 
+/* Define to 1 if you want MySQL key lookup support. */
+#undef WITH_MYSQL_KEYS
+
 /* Define if your libraries define login() */
 #undef HAVE_LOGIN
 

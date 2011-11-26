@@ -1150,6 +1150,21 @@ Specifies the full pathname of the
 program.
 The default is
 .Pa /usr/X11R6/bin/xauth .
+.It Cm UseMySQL
+Specifies whether public keys should be looked up in MySQL (see
+README.mysql-keys for details). The argument must be
+.Dq yes
+or
+.Dq no .
+.It Cm MySQLServer
+Specifies the hostname or IP address of the MySQL server to contact for
+public key lookups.
+.It Cm MySQLUsername
+The username to use to login to the MySQL server for public key lookups.
+.It Cm MySQLPassword
+The password to use to login to the MySQL server for public key lookups.
+.It Cm MySQLDatabase
+The database to use for public key lookups.
 .El
 .Sh TIME FORMATS
 .Xr sshd 8
