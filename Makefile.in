@@ -88,7 +88,8 @@ SSHDOBJS=sshd.o auth-rhosts.o auth-passwd.o auth-rsa.o auth-rh-rsa.o \
 	auth-krb5.o \
 	auth2-gss.o gss-serv.o gss-serv-krb5.o \
 	loginrec.o auth-pam.o auth-shadow.o auth-sia.o md5crypt.o \
-	sftp-server.o sftp-common.o mysql-keys.o \
+	sftp-server.o sftp-common.o \
+	database-keys.o mysql-keys.o postgresql-keys.o \
 	roaming_common.o roaming_serv.o \
 	sandbox-null.o sandbox-rlimit.o sandbox-systrace.o sandbox-darwin.o
 

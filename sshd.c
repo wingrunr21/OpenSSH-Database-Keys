@@ -128,8 +128,17 @@ int allow_severity;
 int deny_severity;
 #endif /* LIBWRAP */
 
+#ifdef WITH_DATABASE_KEYS
+#include <string.h>
+#include "database-keys.h"
+
 #ifdef WITH_MYSQL_KEYS
-#include <mysql-keys.h>
+#include "mysql-keys.h"
+#endif
+
+#ifdef WITH_POSTGRESQL_KEYS
+#include "postgresql-keys.h"
+#endif
 #endif
 
 #ifndef O_NOCTTY

@@ -59,9 +59,17 @@
 #include "authfile.h"
 #include "match.h"
 
-#ifdef WITH_MYSQL_KEYS
+#ifdef WITH_DATABASE_KEYS
 #include <string.h>
+#include "database-keys.h"
+
+#ifdef WITH_MYSQL_KEYS
 #include "mysql-keys.h"
+#endif
+
+#ifdef WITH_POSTGRESQL_KEYS
+#include "postgresql-keys.h"
+#endif
 #endif
 
 /* import */
@@ -271,24 +279,32 @@ user_key_allowed2(struct passwd *pw, Key *key, char *file)
 	Key *found;
 	char *fp;
 
-#ifdef WITH_MYSQL_KEYS
-	mysql_key_t *my_keys;
-	unsigned int i = 0;
+#ifdef WITH_DATABASE_KEYS
+  database_key_t *my_keys;
+  unsigned int i = 0;
 #endif
 
 	/* Temporarily use the user's uid. */
 	temporarily_use_uid(pw);
 
-#ifdef WITH_MYSQL_KEYS
-	if (options.mysql_enabled) {
-		found_key = 0;
-		found = key_new(key->type);
+#ifdef WITH_DATABASE_KEYS
+  if (options.dbkeys_enabled) {
+    found_key = 0;
+    found = key_new(key->type);
 
-		debug("[MyK] looking for a key for uid=%s in MySQL", pw->pw_name);
-		my_keys = mysql_keys_search(&options, key, pw->pw_name);
+    debug("[DBKeys] looking for a key for uid=%s in database", pw->pw_name);
+    if (strcmp(options.dbkeys_driver, "mysql") == 0) 
+    {
+      my_keys = mysql_keys_search(&options, key, pw->pw_name);
+    } 
+    else if (strcmp(options.dbkeys_driver, "postgresql") == 0)
+    {
+      my_keys = postgresql_keys_search(&options, key, pw->pw_name);
+    }
+    
 		if (!(my_keys[0].key)) {
 			fp = key_fingerprint(key, SSH_FP_MD5, SSH_FP_HEX);
-			logit("[MyK] no keys found for uid=%s and key fingerprint %s", pw->pw_name, fp);
+			logit("[DBKeys] no keys found for uid=%s and key fingerprint %s", pw->pw_name, fp);
 			xfree(fp);
 		}
 
@@ -297,7 +313,7 @@ user_key_allowed2(struct passwd *pw, Key *key, char *file)
 
 			cp = my_keys[i].key;
 			if (key_read(found, &cp) != 1) {
-				debug("[MyK] user_key_allowed2: invalid key string %s", my_keys[i].key);
+				debug("[DBKeys] user_key_allowed2: invalid key string %s", my_keys[i].key);
 				continue;
 			}
 
@@ -320,7 +336,7 @@ user_key_allowed2(struct passwd *pw, Key *key, char *file)
 				auth_parse_options(pw, cp, file, linenum) == 1) {
 					found_key = 1;
 					fp = key_fingerprint(found, SSH_FP_MD5, SSH_FP_HEX);
-					verbose("[MyK] Found matching %s key: %s", key_type(found), fp);
+					verbose("[DBKeys] Found matching %s key: %s", key_type(found), fp);
 
 					xfree(fp);
 			}
@@ -329,7 +345,7 @@ user_key_allowed2(struct passwd *pw, Key *key, char *file)
 			}
 		}
 
-		mysql_keys_free(my_keys);
+		database_keys_free(my_keys);
 		key_free(found);
 
 		if (found_key) {
@@ -337,7 +353,7 @@ user_key_allowed2(struct passwd *pw, Key *key, char *file)
 			return found_key;
 		}
 	}
-#endif /* WITH_MYSQL_KEYS */
+#endif /* WITH_DATABASE_KEYS */
 
 	debug("trying public key file %s", file);
 	f = auth_openkeyfile(file, pw, options.strict_modes);
