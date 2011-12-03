@@ -3,9 +3,6 @@
  * Copyright (C) 2011
  * All Rights Reserved
  *
- * Based on an original patch by Matt Palmer <mpalmer@engineyard.com>
- * https://github.com/tmm1/brew2deb/blob/master/packages/openssh/mysql_patch_5.8-p1-1.patch
- *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
@@ -28,20 +25,29 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+#include "includes.h"
+ 
+#ifdef WITH_DATABASE_KEYS
 
-#ifndef MYSQL_KEYS_H
-#define MYSQL_KEYS_H
+#include "database-keys.h"
+#include "xmalloc.h"
 
-#include <mysql.h>
-#include "key.h"
-#include "log.h"
-#include "servconf.h"
+/*
+  Free memory for an array of database_key_t structs
+*/
+void database_keys_free(database_key_t *keys)
+{
+	unsigned int i = 0;
 
-static MYSQL *mysql_handle;
+	for (i = 0; keys[i].key; i++) {
+		xfree(keys[i].key);
 
-void mysql_keys_init(ServerOptions *);
-void mysql_keys_shutdown();
-database_key_t *mysql_keys_search(ServerOptions *, Key *, char *);
+		if (keys[i].options) {
+			xfree(keys[i].options);
+		}
+	}
 
-#endif  /* MYSQL_KEYS_H */
-	
+	xfree(keys);
+}
+
+#endif

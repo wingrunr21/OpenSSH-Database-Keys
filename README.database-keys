@@ -1,9 +1,11 @@
 OpenSSH MySQL key lookup patch
 
-Written by Matt Palmer <mpalmer@engineyard.com>
+Author: Stafford Brunk <stafford.brunk@gmail.com>
+Copyright (C) 2011
+All Rights Reserved
 
-Copyright (C) 2008 Engineyard Inc
-All rights reserved.
+Based on an original patch by Matt Palmer <mpalmer@engineyard.com>
+https://github.com/tmm1/brew2deb/blob/master/packages/openssh/mysql_patch_5.8-p1-1.patch
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions
@@ -32,6 +34,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 Introduction
 ------------
 
+- Matt
 OpenSSH's performance for public key authentication when there are thousands
 of keys in the authorized_keys file is a bit poor.  I don't blame SSH for
 this -- it is optimized for the overwhelmingly common case, and that's fine.
@@ -42,6 +45,15 @@ the key data was already being stored in a MySQL database, so it seemed
 reasonable to just teach SSH to look in there to get it's keys, with a bit
 of indexing to make everything blazingly fast.
 
+- Stafford
+I needed to use database key lookups for SSH with a PostgreSQL database.  Rather
+than simply modify Matt's original patch for PostgreSQL, I decided to abstract
+out the database functionality and allow support for different database drivers.
+Through my experience with the gitolite git management system, I have seen
+that many people wish to provide a more "Github" like SSH key management
+experience without using Github itself.  This patch brings that
+experience one step closer.
+
 
 Why Should I Use This Patch?
 ----------------------------
@@ -50,6 +62,8 @@ Because it makes logins to accounts with thousands of public keys much
 faster.  If you don't have thousands of public keys for a single Unix user,
 you probably have no need for this patch.
 
+It also drastically simplifies the management of SSH keys for access control when
+a more advanced model such as Kerberos cannot be used.
 
 Principle of Operation
 ----------------------
@@ -76,9 +90,6 @@ is to do (b).
 This patch effectively short-circuits the linear search of the
 authorized_keys file by using the fingerprint of the key that is connecting
 as an index to immediately retrieve the full public key of interest. 
-Storing the key in MySQL is nothing special; if you're willing to write the
-key management code and tweak this patch a little, you can store your keys
-in any indexable way.
 
 Before a user attempts to authenticate, you have to have the database
 prepared and user keys imported in an appropriate format.  The exact table
@@ -95,10 +106,16 @@ the client has the private key it says it does.
 Building
 --------
 
-Apply the patch (if you haven't done so already), install the MySQL
-development libraries and headers, then add the --with-mysql-keys option to
+Apply the patch (if you haven't done so already), install the appropriate database
+development libraries and headers, then add the --with-[dbname]-keys option to
 ./configure, followed by the usual building commands.
 
+The following databases are supported:
+
+  * MySQL
+    --with-mysql-keys
+  * PostgreSQL
+    --with-postgresql-keys
 
 Setup and Configuration
 -----------------------
@@ -118,22 +135,25 @@ CREATE INDEX public_keys_username_fingerprint ON public_keys(username, fingerpri
 Yes, the table and column names are hardcoded.  If you'd like to make them
 all configurable, feel free to extend the patch.
 
-Then you need to tell OpenSSH to use MySQL as a source of keys, with the
+Then you need to tell OpenSSH to use the database as a source of keys, with the
 following options in sshd_config:
 
-UseMySQL (yes/no): Whether or not to even consider MySQL as a source of
+UseDatabaseKeys (yes/no): Whether or not to even consider the database as a source of
 	keys.  Default: no
+	
+DatabaseKeystoreDriver (string): The name of the database driver to use.  Options
+  right now are [mysql, postgresql]. No default.
 
-MySQLServer (string): The IP address or hostname of the MySQL server to use. 
+DatabaseKeystoreServer (string): The IP address or hostname of the database server to use. 
 	At present, only one server can be specified.  Default: localhost
 
-MySQLUsername (string): The username to login to the MySQL server with.  No
+DatabaseKeystoreUsername (string): The username to login to the database server with.  No
 	default.
 
-MySQLPassword (string): The password to login to the MySQL server with.  No
+DatabaseKeystorePassword (string): The password to login to the database server with.  No
 	default.
 
-MySQLDatabase (string) The name of the database to use.  No default.
+DatabaseKeystoreDatabase (string) The name of the database to use.  No default.
 
 Finally, you need to populate the database with your users.  I leave that as
 an exercise for the reader, with one hint: the fingerprint of a key can be
@@ -153,6 +173,5 @@ public_keys table.
 Questions?
 ----------
 
-This patch is utterly unsupported; questions to mpalmer@engineyard.com may
-or not be answered depending on how busy I am and how interesting your
-question is.
+See Github:
+  http://www.github.com/wingrunr21/OpenSSH-Database-Keys

@@ -46,10 +46,6 @@
 #include "channels.h"
 #include "groupaccess.h"
 
-#ifdef WITH_MYSQL_KEYS
-#include "mysql-keys.h"
-#endif
-
 static void add_listen_addr(ServerOptions *, char *, int);
 static void add_one_listen_addr(ServerOptions *, char *, int);
 
@@ -142,13 +138,14 @@ initialize_server_options(ServerOptions *options)
 	options->authorized_principals_file = NULL;
 	options->ip_qos_interactive = -1;
 	options->ip_qos_bulk = -1;
-#ifdef WITH_MYSQL_KEYS
-  options->mysql_enabled = -1;
-  options->mysql_dbhost = NULL;
-  options->mysql_dbuser = NULL;
-  options->mysql_dbpass = NULL;
-  options->mysql_dbname = NULL;
-  options->mysql_handle = NULL;
+#ifdef WITH_DATABASE_KEYS
+  options->dbkeys_enabled = -1;
+  options->dbkeys_driver = NULL;
+  options->dbkeys_host = NULL;
+  options->dbkeys_port = -1;
+  options->dbkeys_user = NULL;
+  options->dbkeys_password = NULL;
+  options->dbkeys_database = NULL;
 #endif
 }
 
@@ -303,18 +300,20 @@ fill_default_server_options(ServerOptions *options)
 	}
 #endif
 
-#ifdef WITH_MYSQL_KEYS
-  if (options->mysql_enabled == -1)
-    options->mysql_enabled = 0;
-  if (options->mysql_enabled == 1
-      && (!options->mysql_dbhost
-      || !options->mysql_dbuser
-      || !options->mysql_dbpass
-      || !options->mysql_dbname
+#ifdef WITH_DATABASE_KEYS
+  if (options->dbkeys_enabled == -1)
+    options->dbkeys_enabled = 0;
+  if (options->dbkeys_enabled == 1
+      && (!options->dbkeys_host
+      || (options->dbkeys_port < 0)
+      || !options->dbkeys_user
+      || !options->dbkeys_password
+      || !options->dbkeys_database
+      || !options->dbkeys_driver
       )
   ) {
-    logit("You asked for MySQL, but didn't specify all the options. No MySQL for you! One year!");
-    options->mysql_enabled = 0;
+    logit("You asked for database keys, but didn't specify all the options.");
+    options->dbkeys_enabled = 0;
   }
 #endif
 
@@ -352,9 +351,10 @@ typedef enum {
 	sRevokedKeys, sTrustedUserCAKeys, sAuthorizedPrincipalsFile,
 	sKexAlgorithms, sIPQoS,
 	sDeprecated, sUnsupported
-#ifdef WITH_MYSQL_KEYS
- , sUseMySQL, sMySQLServer, sMySQLUsername,
- sMySQLPassword, sMySQLDatabase
+#ifdef WITH_DATABASE_KEYS
+ , sUseDatabaseKeystore, sDatabaseKeystoreDriver, sDatabaseKeystoreServer, 
+  sDatabaseKeystorePort, sDatabaseKeystoreUsername, sDatabaseKeystorePassword,
+  sDatabaseKeystoreDatabase
 #endif
 } ServerOpCodes;
 
@@ -479,12 +479,14 @@ static struct {
 	{ "authorizedprincipalsfile", sAuthorizedPrincipalsFile, SSHCFG_ALL },
 	{ "kexalgorithms", sKexAlgorithms, SSHCFG_GLOBAL },
 	{ "ipqos", sIPQoS, SSHCFG_ALL },
-#ifdef WITH_MYSQL_KEYS
-  { "UseMySQL", sUseMySQL, SSHCFG_GLOBAL },
-  { "MySQLServer", sMySQLServer, SSHCFG_GLOBAL },
-  { "MySQLUsername", sMySQLUsername, SSHCFG_GLOBAL },
-  { "MySQLPassword", sMySQLPassword, SSHCFG_GLOBAL },
-  { "MySQLDatabase", sMySQLDatabase, SSHCFG_GLOBAL },
+#ifdef WITH_DATABASE_KEYS
+  { "UseDatabaseKeystore", sUseDatabaseKeystore, SSHCFG_GLOBAL },
+  { "DatabaseKeystoreDriver", sDatabaseKeystoreDriver, SSHCFG_GLOBAL },
+  { "DatabaseKeystoreServer", sDatabaseKeystoreServer, SSHCFG_GLOBAL },
+  { "DatabaseKeystorePort", sDatabaseKeystorePort, SSHCFG_GLOBAL },
+  { "DatabaseKeystoreUsername", sDatabaseKeystoreUsername, SSHCFG_GLOBAL },
+  { "DatabaseKeystorePassword", sDatabaseKeystorePassword, SSHCFG_GLOBAL },
+  { "DatabaseKeystoreDatabase", sDatabaseKeystoreDatabase, SSHCFG_GLOBAL },
 #endif
 	{ NULL, sBadOption, 0 }
 };
@@ -1447,43 +1449,55 @@ process_server_config_line(ServerOptions *options, char *line,
 		    arg = strdelim(&cp);
 		break;
 
-#ifdef WITH_MYSQL_KEYS
-  case sUseMySQL:
-    intptr = &options->mysql_enabled;
+#ifdef WITH_DATABASE_KEYS
+  case sUseDatabaseKeystore:
+    intptr = &options->dbkeys_enabled;
     goto parse_flag;
-
-  case sMySQLServer:
+    
+  case sDatabaseKeystoreDriver:
     arg = cp;
     if (!arg || *arg == '\0')
-      fatal("%s line %d: missing MySQL server name", filename, linenum);
-    options->mysql_dbhost = xstrdup(arg);
+      fatal("%s line %d: missing database driver name", filename, linenum);
+    options->dbkeys_driver = xstrdup(arg);
     memset(arg, 0, strlen(arg));
     break;
 
-  case sMySQLUsername:
+  case sDatabaseKeystoreServer:
     arg = cp;
     if (!arg || *arg == '\0')
-      fatal("%s line %d: missing MySQL username", filename, linenum);
-    options->mysql_dbuser = xstrdup(arg);
+      fatal("%s line %d: missing database server name", filename, linenum);
+    options->dbkeys_host = xstrdup(arg);
+    memset(arg, 0, strlen(arg));
+    break;
+    
+  case sDatabaseKeystorePort:
+    intptr = &options->dbkeys_port;
+    goto parse_int;
+
+  case sDatabaseKeystoreUsername:
+    arg = cp;
+    if (!arg || *arg == '\0')
+      fatal("%s line %d: missing database username", filename, linenum);
+    options->dbkeys_user = xstrdup(arg);
     memset(arg, 0, strlen(arg));
     break;
 
-  case sMySQLPassword:
+  case sDatabaseKeystorePassword:
     arg = cp;
     if (!arg || *arg == '\0')
-      fatal("%s line %d: missing MySQL password", filename, linenum);
-    options->mysql_dbpass = xstrdup(arg);
+      fatal("%s line %d: missing database password", filename, linenum);
+    options->dbkeys_password = xstrdup(arg);
     memset(arg, 0, strlen(arg));
     break;
 
-  case sMySQLDatabase:
+  case sDatabaseKeystoreDatabase:
     arg = cp;
     if (!arg || *arg == '\0')
-      fatal("%s line %d: missing MySQL database name", filename, linenum);
-    options->mysql_dbname = xstrdup(arg);
+      fatal("%s line %d: missing database name", filename, linenum);
+    options->dbkeys_database = xstrdup(arg);
     memset(arg, 0, strlen(arg));
     break;
-#endif /* WITH_MYSQL_KEYS */
+#endif /* WITH_DATABASE_KEYS */
 
 	default:
 		fatal("%s line %d: Missing handler for opcode %s (%d)",

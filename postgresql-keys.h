@@ -29,19 +29,20 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef MYSQL_KEYS_H
-#define MYSQL_KEYS_H
+#ifndef POSTGRESQL_KEYS_H
+#define POSTGRESQL_KEYS_H
 
-#include <mysql.h>
+#include <libpq-fe.h>
 #include "key.h"
 #include "log.h"
 #include "servconf.h"
+#include "database-keys.h"
 
-static MYSQL *mysql_handle;
+static PGconn *postgresql_handle;
 
-void mysql_keys_init(ServerOptions *);
-void mysql_keys_shutdown();
-database_key_t *mysql_keys_search(ServerOptions *, Key *, char *);
+void postgresql_keys_init(ServerOptions *);
+void postgresql_keys_shutdown();
+database_key_t *postgresql_keys_search(ServerOptions *, Key *, char *);
 
-#endif  /* MYSQL_KEYS_H */
+#endif  /* POSTGRESQL_KEYS_H */
 	

@@ -3,9 +3,6 @@
  * Copyright (C) 2011
  * All Rights Reserved
  *
- * Based on an original patch by Matt Palmer <mpalmer@engineyard.com>
- * https://github.com/tmm1/brew2deb/blob/master/packages/openssh/mysql_patch_5.8-p1-1.patch
- *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
@@ -28,20 +25,25 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+ 
+#ifndef DATABASE_KEYS_H
+#define DATABASE_KEYS_H
 
-#ifndef MYSQL_KEYS_H
-#define MYSQL_KEYS_H
-
-#include <mysql.h>
 #include "key.h"
 #include "log.h"
 #include "servconf.h"
 
-static MYSQL *mysql_handle;
+#define DATABASE_KEYS_ERROR_RETURN  key_list = xmalloc(sizeof(database_key_t)); \
+                                    key_list[0].key = NULL; \
+                                    return key_list;
+                               
+#define KEY_QUERY_TEMPLATE "SELECT public_keys.key,public_keys.options FROM public_keys WHERE username='%s' AND fingerprint='%s'"
 
-void mysql_keys_init(ServerOptions *);
-void mysql_keys_shutdown();
-database_key_t *mysql_keys_search(ServerOptions *, Key *, char *);
+typedef struct database_key_s {
+	char   *key;
+	char   *options;
+} database_key_t;
 
-#endif  /* MYSQL_KEYS_H */
-	
+void database_keys_free(database_key_t *);
+
+#endif  /* DATABASE_KEYS_H */

@@ -1,7 +1,10 @@
 /*
- * Author: Matt Palmer <mpalmer@engineyard.com>
- * Copyright (C) 2008 Engineyard Inc.
+ * Author: Stafford Brunk <stafford.brunk@gmail.com>
+ * Copyright (C) 2011
  * All Rights Reserved
+ *
+ * Based on an original patch by Matt Palmer <mpalmer@engineyard.com>
+ * https://github.com/tmm1/brew2deb/blob/master/packages/openssh/mysql_patch_5.8-p1-1.patch
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -30,18 +33,14 @@
 
 #ifdef WITH_MYSQL_KEYS
 
+#include "database-keys.h"
 #include "mysql-keys.h"
 #include "xmalloc.h"
 
-#include <mysql/mysql.h>
-#include <mysql/errmsg.h>
+#include <mysql.h>
+#include <errmsg.h>
 #include <stdio.h>
 #include <string.h>
-
-/* Return an "empty" result set, so that callers don't get too upset */
-#define MYSQL_KEYS_ERROR_RETURN  key_list = xmalloc(sizeof(mysql_key_t));	\
-                                 key_list[0].key = NULL;			\
-                                 return key_list;
 
 /* Initialise the MySQL connection handle in ServerOptions.  Can be called
  * multiple times, whenever you want the connection to be recycled.
@@ -53,34 +52,37 @@
  */
 void mysql_keys_init(ServerOptions *opts)
 {
-	debug("[MyK] Initialising MySQL connection");
-	/* Clean up if we're recycling an existing connection */
-	if (opts->mysql_handle != NULL) {
-		debug("[MyK] Closing an existing connection");
-		mysql_close(opts->mysql_handle);
+	debug("[DBKeys] Initialising MySQL connection");
+	
+	/* Cleanup any existing connections */
+  mysql_keys_shutdown();
+	
+	mysql_handle = mysql_init(NULL);
+	
+	if (opts->dbkeys_port < 0)
+	{
+    opts->dbkeys_port = 0;
 	}
 	
-	opts->mysql_handle = mysql_init(NULL);
-	
-	if (!mysql_real_connect(opts->mysql_handle,
-	                        opts->mysql_dbhost,
-	                        opts->mysql_dbuser,
-	                        opts->mysql_dbpass,
-	                        opts->mysql_dbname,
-	                        0, NULL, 0)) {
-		logit("[MyK] Failed to connect to MySQL server %s: %s",
-		      opts->mysql_dbhost,
-		      mysql_error(opts->mysql_handle));
+	if (!mysql_real_connect(mysql_handle,
+	                        opts->dbkeys_host,
+	                        opts->dbkeys_user,
+	                        opts->dbkeys_password,
+	                        opts->dbkeys_database,
+	                        opts->dbkeys_port, NULL, 0)) {
+		logit("[DBKeys] Failed to connect to MySQL server %s: %s",
+		      opts->dbkeys_host,
+		      mysql_error(mysql_handle));
 	}
 }
 
 /* Shutdown the MySQL connection. */
-void mysql_keys_shutdown(ServerOptions *opts)
+void mysql_keys_shutdown()
 {
-	debug("[MyK] Closing MySQL connection");
-	if (opts->mysql_handle != NULL) {
-		mysql_close(opts->mysql_handle);
-		opts->mysql_handle = NULL;
+	if (mysql_handle != NULL) {
+	  debug("[DBKeys] Closing MySQL connection");
+		mysql_close(mysql_handle);
+		mysql_handle = NULL;
 	}
 }
 
@@ -88,77 +90,80 @@ void mysql_keys_shutdown(ServerOptions *opts)
  * given key, and returns an array of all of the keys that match (if any).
  * The array is terminated by an entry with the key set to NULL.
  */
-mysql_key_t *mysql_keys_search(ServerOptions *opts, Key *key, char *username)
+database_key_t *mysql_keys_search(ServerOptions *opts, Key *key, char *username)
 {
 	MYSQL_RES *res;
 	MYSQL_ROW row;
-	mysql_key_t *key_list;
+	database_key_t *key_list;
 	char query[1024], *fp, *qfp, *qusername;
 	unsigned int qlen, i;
 	int my_err;
 	
-	if (!opts->mysql_handle) {
+	debug("SEARCH mysql_handle is NULL %s", mysql_handle == NULL ? "true" : "false");
+	if (!mysql_handle) {
 		mysql_keys_init(opts);
 	}
 	
-	if (mysql_ping(opts->mysql_handle) != 0) {
+	if (mysql_ping(mysql_handle) != 0) {
 		mysql_keys_init(opts);
-		if (mysql_ping(opts->mysql_handle) != 0) {
-			logit("[MyK] Connection to the database server failed: %s", mysql_error(opts->mysql_handle));
-			mysql_keys_shutdown(opts);
-			MYSQL_KEYS_ERROR_RETURN
+		if (mysql_ping(mysql_handle) != 0) {
+			logit("[DBKeys] Connection to the database server failed: %s", mysql_error(mysql_handle));
+			mysql_keys_shutdown();
+			DATABASE_KEYS_ERROR_RETURN
 		}
 	}
 	
 	fp = key_fingerprint(key, SSH_FP_MD5, SSH_FP_HEX);
 	qfp = xmalloc(strlen(fp) * 2 + 1);
-	mysql_real_escape_string(opts->mysql_handle, qfp, fp, strlen(fp));
+	mysql_real_escape_string(mysql_handle, qfp, fp, strlen(fp));
 	xfree(fp);
 
 	qusername = xmalloc(strlen(username) * 2 + 1);
-	mysql_real_escape_string(opts->mysql_handle, qusername, username, strlen(username));
-	
-	qlen = snprintf(query, 1024, "SELECT `key`,`options` FROM `public_keys` WHERE `username`='%s' AND `fingerprint`='%s'", qusername, qfp);
+	mysql_real_escape_string(mysql_handle, qusername, username, strlen(username));
+
+  /* See macro definition in database-keys.h */
+  qlen = snprintf(query, 1024, KEY_QUERY_TEMPLATE, qusername, qfp);
+
 	if (qlen >= 1024) {
 		xfree(qfp);
 		xfree(qusername);
-		mysql_keys_shutdown(opts);
-		fatal("[MyK] The impossible happened... snprintf overflowed my giant buffer!");
+		mysql_keys_shutdown();
+		fatal("[DBKeys] The impossible happened... snprintf overflowed my giant buffer!");
 	}
 	
 	xfree(qfp);
 	xfree(qusername);
 
-	debug2("[MyK] Going to execute query: '%s'", query);
+	debug2("[DBKeys] Going to execute query: '%s'", query);
 	
-	if ((my_err = mysql_real_query(opts->mysql_handle, query, qlen)) != 0) {
+	if ((my_err = mysql_real_query(mysql_handle, query, qlen)) != 0) {
 		if ((my_err == CR_SERVER_GONE_ERROR || my_err == CR_SERVER_LOST)) {
-			if (mysql_real_query(opts->mysql_handle, query, qlen) != 0) {
-				error("[MyK] Failed to execute query '%s': %s", query, mysql_error(opts->mysql_handle));
-				mysql_keys_shutdown(opts);
-				MYSQL_KEYS_ERROR_RETURN
+			if (mysql_real_query(mysql_handle, query, qlen) != 0) {
+				error("[DBKeys] Failed to execute query '%s': %s", query, mysql_error(mysql_handle));
+				mysql_keys_shutdown();
+				DATABASE_KEYS_ERROR_RETURN
 			}
 		} else {
-			error("[MyK] Failed to execute query '%s': %s", query, mysql_error(opts->mysql_handle));
-			mysql_keys_shutdown(opts);
-			MYSQL_KEYS_ERROR_RETURN
+			error("[DBKeys] Failed to execute query '%s': %s", query, mysql_error(mysql_handle));
+			mysql_keys_shutdown();
+			DATABASE_KEYS_ERROR_RETURN
 		}
 	}
 	
 	/* So if we got through the gauntlet of error handling, the query
 	 * must have succeeded, and we can retrieve some results.
 	 */
-	res = mysql_store_result(opts->mysql_handle);
+	res = mysql_store_result(mysql_handle);
 	
 	if (!res) {
-		error("[MyK] Failed to retrieve result set: %s", mysql_error(opts->mysql_handle));
-		mysql_keys_shutdown(opts);
-		MYSQL_KEYS_ERROR_RETURN
+		error("[DBKeys] Failed to retrieve result set: %s", mysql_error(mysql_handle));
+		mysql_keys_shutdown();
+		DATABASE_KEYS_ERROR_RETURN
 	}
 	
-	debug2("[MyK] Query returned %u results", (unsigned int)mysql_num_rows(res));
+	debug2("[DBKeys] Query returned %u results", (unsigned int)mysql_num_rows(res));
 	
-	key_list = xmalloc(sizeof(mysql_key_t) * (mysql_num_rows(res) + 1));
+	key_list = xmalloc(sizeof(database_key_t) * (mysql_num_rows(res) + 1));
 	for (i = 0; (row = mysql_fetch_row(res)); i++) {
 		key_list[i].key = xstrdup(row[0]);
 		if (row[1]) {
@@ -169,26 +174,8 @@ mysql_key_t *mysql_keys_search(ServerOptions *opts, Key *key, char *username)
 	}
 	key_list[i].key = NULL;
 	
-	mysql_keys_shutdown(opts);
+	mysql_keys_shutdown();
 	return key_list;
-}
-
-/* Deallocate an array of mysql_key_t structures, including the
- * array itself.
- */
-void mysql_keys_free(mysql_key_t *keys)
-{
-	unsigned i = 0;
-	
-	for (i = 0; keys[i].key; i++) {
-		xfree(keys[i].key);
-		
-		if (keys[i].options) {
-			xfree(keys[i].options);
-		}
-	}
-	
-	xfree(keys);
 }
 
 #endif  /* WITH_MYSQL_KEYS */

@@ -20,6 +20,7 @@
 
 #include <sys/types.h>
 
+#undef __APPLE_API_PRIVATE /* temp fix to build on 10.7 */
 #include <sandbox.h>
 
 #include <errno.h>
