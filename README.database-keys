@@ -1,0 +1,176 @@
+OpenSSH MySQL key lookup patch
+
+Written by Matt Palmer <mpalmer@engineyard.com>
+Modifications by Stafford Brunk <stafford.brunk@gmail.com>
+
+Copyright (C) 2011
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+3. The name of the author may not be used to endorse or promote products
+   derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR `AS IS'' AND ANY EXPRESS OR
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+Introduction
+------------
+
+- Matt
+OpenSSH's performance for public key authentication when there are thousands
+of keys in the authorized_keys file is a bit poor.  I don't blame SSH for
+this -- it is optimized for the overwhelmingly common case, and that's fine.
+
+This patch, however, is a way of optimizing for the uncommon case of a very
+large number of keys attached to a single Unix user account.  In my case,
+the key data was already being stored in a MySQL database, so it seemed
+reasonable to just teach SSH to look in there to get it's keys, with a bit
+of indexing to make everything blazingly fast.
+
+- Stafford
+I needed to use database key lookups for SSH with a PostgreSQL database.  Rather
+than simply modify Matt's original patch for PostgreSQL, I decided to abstract
+out the database functionality and allow support for different database drivers.
+Through my experience with the gitolite git management system, I have seen
+that many people wish to provide a more "Github" like SSH key management
+experience without using Github itself.  This patch brings that
+experience one step closer.
+
+
+Why Should I Use This Patch?
+----------------------------
+
+Because it makes logins to accounts with thousands of public keys much
+faster.  If you don't have thousands of public keys for a single Unix user,
+you probably have no need for this patch.
+
+It also drastically simplifies the management of SSH keys for access control when
+a more advanced model such as Kerberos cannot be used.
+
+Principle of Operation
+----------------------
+
+The first thing you need to understand is how SSH does key lookups in an
+authorized_keys file.  This work is primarily done in auth-rsa.c and
+auth2-pubkey.c.  When a pubkey authentication method is requested, the
+client presents some information about the key that it wants to authenticate
+with (not the whole key, just a few selected bits of info) along with the
+info that every sort of login needs (username, etc).  The server then opens
+up the user's authorized_keys file and parses that file one line at a time,
+looking for a public key that has the same values for the selected bits of
+info as the key that the client is using.  A challenge/response process is
+then initiated, so that the client can *prove* it's got the correct key, and
+not just the few bits of info it initially presented (which are, after all,
+in the public key as well).
+
+What is particularly important to note here is that (a) the trundling
+through the authorized_keys file is a linear search; and (b) there is enough
+info presented by the client for us to be able to do a near-guaranteed
+unique index search of the available public keys.  The purpose of this patch
+is to do (b).
+
+This patch effectively short-circuits the linear search of the
+authorized_keys file by using the fingerprint of the key that is connecting
+as an index to immediately retrieve the full public key of interest. 
+
+Before a user attempts to authenticate, you have to have the database
+prepared and user keys imported in an appropriate format.  The exact table
+structure is documented in the 'Setup' section, but basically you need to
+create the table and then populate it with keys and their fingerprints.
+
+When a user attempts to authenticate using a public key, the server computes
+the fingerprint of the key that is presented and tries to retrieve all keys
+that match the username and computed index hash.  The usual public key
+challenge/response dance is then performed with each key to guarantee that
+the client has the private key it says it does.
+
+
+Building
+--------
+
+Apply the patch (if you haven't done so already), install the appropriate database
+development libraries and headers, then add the --with-[dbname]-keys option to
+./configure, followed by the usual building commands.
+
+The following databases are supported:
+
+  * MySQL
+    --with-mysql-keys
+  * PostgreSQL
+    --with-postgresql-keys
+
+Setup and Configuration
+-----------------------
+
+The minimum table you need to have created is as follows:
+
+CREATE TABLE public_keys (
+  username VARCHAR(255) NOT NULL,  -- Unix username for the key --
+  options VARCHAR(255),  -- Options for the key --
+  key TEXT NOT NULL,  -- The key itself, exactly as it would be in --
+                      -- authorized_keys, including the key type and ID --
+  fingerprint CHAR(48) NOT NULL  -- Key fingerprint; see below --
+);
+
+CREATE INDEX public_keys_username_fingerprint ON public_keys(username, fingerprint);
+
+Yes, the table and column names are hardcoded.  If you'd like to make them
+all configurable, feel free to extend the patch.
+
+Then you need to tell OpenSSH to use the database as a source of keys, with the
+following options in sshd_config:
+
+UseDatabaseKeys (yes/no): Whether or not to even consider the database as a source of
+	keys.  Default: no
+	
+DatabaseKeystoreDriver (string): The name of the database driver to use.  Options
+  right now are [mysql, postgresql]. No default.
+
+DatabaseKeystoreServer (string): The IP address or hostname of the database server to use. 
+	At present, only one server can be specified.  Default: localhost
+
+DatabaseKeystoreUsername (string): The username to login to the database server with.  No
+	default.
+
+DatabaseKeystorePassword (string): The password to login to the database server with.  No
+	default.
+
+DatabaseKeystoreDatabase (string) The name of the database to use.  No default.
+
+Finally, you need to populate the database with your users.  I leave that as
+an exercise for the reader, with one hint: the fingerprint of a key can be
+obtained with the command "ssh-keygen -l -f <file> | cut -d ' ' -f 2" (or
+equivalent).
+
+
+Operation
+---------
+
+If something appears to be going wrong, check the debug logs -- the patch is
+pretty keen on putting a lot of info in there.  Otherwise there shouldn't
+need to be much on-going maintenance, except to maintain your keys in the
+public_keys table.
+
+
+Questions?
+----------
+
+See Github:
+  http://www.github.com/wingrunr21/OpenSSH-DatabaseKeys

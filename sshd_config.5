@@ -1141,6 +1141,25 @@ Specifies the full pathname of the
 program.
 The default is
 .Pa /usr/X11R6/bin/xauth .
+.It Cm UseDatabaseKeys
+Specifies whether public keys should be looked up in a database (see
+README.database-keys for details). The argument must be
+.Dq yes
+or
+.Dq no .
+.It Cm DatabaseKeystoreDriver
+Specifies the driver to use for database key lookups.  Current choices are: [mysql, postgresql]
+.It Cm DatabaseKeystoreServer
+Specifies the hostname or IP address of the database server to connect to for
+public key lookups.
+.It Cm DatabaseKeystorePort
+Specifies the port to use when connecting to the database server for public key lookups.
+.It Cm DatabaseKeystoreUsername
+The username to use to login to the database server for public key lookups.
+.It Cm DatabaseKeystorePassword
+The password to use to login to the database server for public key lookups.
+.It Cm DatabaseKeystoreDatabase
+The database to use for public key lookups.
 .El
 .Sh TIME FORMATS
 .Xr sshd 8

@@ -1422,6 +1422,80 @@ AC_ARG_WITH(audit,
 	esac ]
 )
 
+use_database_keys=0
+
+MYSQL_KEYS_MSG="no"
+AC_ARG_WITH(mysql-keys,
+	[  --with-mysql-keys[[=PATH]]     Enable MySQL key lookups (optionally with PATH)],
+	[
+		if test "x$withval" != "xno" ; then
+			if test "x$withval" != "xyes" ; then
+				CPPFLAGS="$CPPFLAGS -I${withval}/include"
+				LDFLAGS="$LDFLAGS -L${withval}/lib"
+			fi
+			
+			AC_DEFINE([WITH_MYSQL_KEYS], 1, [Enable MySQL pubkey support])
+			LIBS="$LIBS -lmysqlclient"
+			MYSQL_KEYS_MSG="yes"
+
+			if test "x$use_database_keys" = "x0"; then
+      	AC_DEFINE([WITH_DATABASE_KEYS], 1, [Enable database pubkey support])
+      	use_database_keys=1
+      fi
+			
+			AC_CHECK_HEADER([mysql.h],
+			  [
+			    AC_CHECK_LIB(mysqlclient, mysql_init,
+            [],
+  			    [
+  				    AC_MSG_ERROR([** Incomplete or missing MySQL libraries **])
+  				  ]
+  			  )
+  			],
+  			[
+				 AC_MSG_ERROR([** Incomplete or missing MySQL libraries **])
+				]
+  		)
+		fi
+	]
+)
+
+POSTGRESQL_KEYS_MSG="no"
+AC_ARG_WITH(postgresql-keys,
+	[  --with-postgresql-keys[[=PATH]]     Enable PostgreSQL key lookups (optionally with PATH)],
+	[
+		if test "x$withval" != "xno" ; then
+			if test "x$withval" != "xyes" ; then
+				CPPFLAGS="$CPPFLAGS -I${withval}/include"
+				LDFLAGS="$LDFLAGS -L${withval}/lib"
+			fi
+			
+			AC_DEFINE([WITH_POSTGRESQL_KEYS], 1, [Enable PostgreSQL pubkey support])
+			LIBS="$LIBS -lpq"
+			POSTGRESQL_KEYS_MSG="yes"
+
+			if test "x$use_database_keys" = "x0"; then
+      	AC_DEFINE([WITH_DATABASE_KEYS], 1, [Enable database pubkey support])
+      	use_database_keys=1
+      fi
+			
+			AC_CHECK_HEADER([libpq-fe.h],
+			  [
+			    AC_CHECK_LIB(pq, PQconnectdb,
+            [],
+  			    [
+  				    AC_MSG_ERROR([** Incomplete or missing PostgreSQL libraries **])
+  				  ]
+  			  )
+  			],
+  			[
+				 AC_MSG_ERROR([** Incomplete or missing PostgreSQL libraries **])
+				]
+  		)
+		fi
+	]
+)
+
 dnl    Checks for library functions. Please keep in alphabetical order
 AC_CHECK_FUNCS( \
 	arc4random \
@@ -4319,6 +4393,8 @@ echo "                   SELinux support: $SELINUX_MSG"
 echo "                 Smartcard support: $SCARD_MSG"
 echo "                     S/KEY support: $SKEY_MSG"
 echo "              TCP Wrappers support: $TCPW_MSG"
+echo "            MySQL keystore support: $MYSQL_KEYS_MSG"
+echo "       PostgreSQL keystore support: $POSTGRESQL_KEYS_MSG"
 echo "              MD5 password support: $MD5_MSG"
 echo "                   libedit support: $LIBEDIT_MSG"
 echo "  Solaris process contract support: $SPC_MSG"

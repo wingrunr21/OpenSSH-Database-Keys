@@ -139,6 +139,15 @@ initialize_server_options(ServerOptions *options)
 	options->authorized_principals_file = NULL;
 	options->ip_qos_interactive = -1;
 	options->ip_qos_bulk = -1;
+#ifdef WITH_DATABASE_KEYS
+  options->dbkeys_enabled = -1;
+  options->dbkeys_driver = NULL;
+  options->dbkeys_host = NULL;
+  options->dbkeys_port = -1;
+  options->dbkeys_user = NULL;
+  options->dbkeys_password = NULL;
+  options->dbkeys_database = NULL;
+#endif
 }
 
 void
@@ -295,6 +304,23 @@ fill_default_server_options(ServerOptions *options)
 	}
 #endif
 
+#ifdef WITH_DATABASE_KEYS
+  if (options->dbkeys_enabled == -1)
+    options->dbkeys_enabled = 0;
+  if (options->dbkeys_enabled == 1
+      && (!options->dbkeys_host
+      || (options->dbkeys_port < 0)
+      || !options->dbkeys_user
+      || !options->dbkeys_password
+      || !options->dbkeys_database
+      || !options->dbkeys_driver
+      )
+  ) {
+    logit("You asked for database keys, but didn't specify all the options.");
+    options->dbkeys_enabled = 0;
+  }
+#endif
+
 }
 
 /* Keyword tokens. */
@@ -329,6 +355,11 @@ typedef enum {
 	sRevokedKeys, sTrustedUserCAKeys, sAuthorizedPrincipalsFile,
 	sKexAlgorithms, sIPQoS,
 	sDeprecated, sUnsupported
+#ifdef WITH_DATABASE_KEYS
+ , sUseDatabaseKeystore, sDatabaseKeystoreDriver, sDatabaseKeystoreServer, 
+  sDatabaseKeystorePort, sDatabaseKeystoreUsername, sDatabaseKeystorePassword,
+  sDatabaseKeystoreDatabase
+#endif
 } ServerOpCodes;
 
 #define SSHCFG_GLOBAL	0x01	/* allowed in main section of sshd_config */
@@ -452,6 +483,15 @@ static struct {
 	{ "authorizedprincipalsfile", sAuthorizedPrincipalsFile, SSHCFG_ALL },
 	{ "kexalgorithms", sKexAlgorithms, SSHCFG_GLOBAL },
 	{ "ipqos", sIPQoS, SSHCFG_ALL },
+#ifdef WITH_DATABASE_KEYS
+  { "UseDatabaseKeystore", sUseDatabaseKeystore, SSHCFG_GLOBAL },
+  { "DatabaseKeystoreDriver", sDatabaseKeystoreDriver, SSHCFG_GLOBAL },
+  { "DatabaseKeystoreServer", sDatabaseKeystoreServer, SSHCFG_GLOBAL },
+  { "DatabaseKeystorePort", sDatabaseKeystorePort, SSHCFG_GLOBAL },
+  { "DatabaseKeystoreUsername", sDatabaseKeystoreUsername, SSHCFG_GLOBAL },
+  { "DatabaseKeystorePassword", sDatabaseKeystorePassword, SSHCFG_GLOBAL },
+  { "DatabaseKeystoreDatabase", sDatabaseKeystoreDatabase, SSHCFG_GLOBAL },
+#endif
 	{ NULL, sBadOption, 0 }
 };
 
@@ -1411,6 +1451,56 @@ process_server_config_line(ServerOptions *options, char *line,
 		while (arg)
 		    arg = strdelim(&cp);
 		break;
+
+#ifdef WITH_DATABASE_KEYS
+  case sUseDatabaseKeystore:
+    intptr = &options->dbkeys_enabled;
+    goto parse_flag;
+    
+  case sDatabaseKeystoreDriver:
+    arg = cp;
+    if (!arg || *arg == '\0')
+      fatal("%s line %d: missing database driver name", filename, linenum);
+    options->dbkeys_driver = xstrdup(arg);
+    memset(arg, 0, strlen(arg));
+    break;
+
+  case sDatabaseKeystoreServer:
+    arg = cp;
+    if (!arg || *arg == '\0')
+      fatal("%s line %d: missing database server name", filename, linenum);
+    options->dbkeys_host = xstrdup(arg);
+    memset(arg, 0, strlen(arg));
+    break;
+    
+  case sDatabaseKeystorePort:
+    intptr = &options->dbkeys_port;
+    goto parse_int;
+
+  case sDatabaseKeystoreUsername:
+    arg = cp;
+    if (!arg || *arg == '\0')
+      fatal("%s line %d: missing database username", filename, linenum);
+    options->dbkeys_user = xstrdup(arg);
+    memset(arg, 0, strlen(arg));
+    break;
+
+  case sDatabaseKeystorePassword:
+    arg = cp;
+    if (!arg || *arg == '\0')
+      fatal("%s line %d: missing database password", filename, linenum);
+    options->dbkeys_password = xstrdup(arg);
+    memset(arg, 0, strlen(arg));
+    break;
+
+  case sDatabaseKeystoreDatabase:
+    arg = cp;
+    if (!arg || *arg == '\0')
+      fatal("%s line %d: missing database name", filename, linenum);
+    options->dbkeys_database = xstrdup(arg);
+    memset(arg, 0, strlen(arg));
+    break;
+#endif /* WITH_DATABASE_KEYS */
 
 	default:
 		fatal("%s line %d: Missing handler for opcode %s (%d)",
