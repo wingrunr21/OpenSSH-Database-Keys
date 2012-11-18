@@ -1,0 +1,1961 @@
+diff --git a/Makefile.in b/Makefile.in
+index 870a7f1..6ace974 100644
+--- a/Makefile.in
++++ b/Makefile.in
+@@ -94,6 +94,7 @@ SSHDOBJS=sshd.o auth-rhosts.o auth-passwd.o auth-rsa.o auth-rh-rsa.o \
+ 	auth2-gss.o gss-serv.o gss-serv-krb5.o \
+ 	loginrec.o auth-pam.o auth-shadow.o auth-sia.o md5crypt.o \
+ 	sftp-server.o sftp-common.o \
++	database-keys.o mysql-keys.o postgresql-keys.o \
+ 	roaming_common.o roaming_serv.o
+ 
+ MANPAGES	= moduli.5.out scp.1.out ssh-add.1.out ssh-agent.1.out ssh-keygen.1.out ssh-keyscan.1.out ssh.1.out sshd.8.out sftp-server.8.out sftp.1.out ssh-rand-helper.8.out ssh-keysign.8.out ssh-pkcs11-helper.8.out sshd_config.5.out ssh_config.5.out
+diff --git a/README.database-keys b/README.database-keys
+new file mode 100644
+index 0000000..5c33a0d
+--- /dev/null
++++ b/README.database-keys
+@@ -0,0 +1,176 @@
++OpenSSH MySQL key lookup patch
++
++Written by Matt Palmer <mpalmer@engineyard.com>
++Modifications by Stafford Brunk <stafford.brunk@gmail.com>
++
++Copyright (C) 2011
++All rights reserved.
++
++Redistribution and use in source and binary forms, with or without
++modification, are permitted provided that the following conditions
++are met:
++
++1. Redistributions of source code must retain the above copyright
++   notice, this list of conditions and the following disclaimer.
++2. Redistributions in binary form must reproduce the above copyright
++   notice, this list of conditions and the following disclaimer in the
++   documentation and/or other materials provided with the distribution.
++3. The name of the author may not be used to endorse or promote products
++   derived from this software without specific prior written permission.
++
++THIS SOFTWARE IS PROVIDED BY THE AUTHOR `AS IS'' AND ANY EXPRESS OR
++IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++
++Introduction
++------------
++
++- Matt
++OpenSSH's performance for public key authentication when there are thousands
++of keys in the authorized_keys file is a bit poor.  I don't blame SSH for
++this -- it is optimized for the overwhelmingly common case, and that's fine.
++
++This patch, however, is a way of optimizing for the uncommon case of a very
++large number of keys attached to a single Unix user account.  In my case,
++the key data was already being stored in a MySQL database, so it seemed
++reasonable to just teach SSH to look in there to get it's keys, with a bit
++of indexing to make everything blazingly fast.
++
++- Stafford
++I needed to use database key lookups for SSH with a PostgreSQL database.  Rather
++than simply modify Matt's original patch for PostgreSQL, I decided to abstract
++out the database functionality and allow support for different database drivers.
++Through my experience with the gitolite git management system, I have seen
++that many people wish to provide a more "Github" like SSH key management
++experience without using Github itself.  This patch brings that
++experience one step closer.
++
++
++Why Should I Use This Patch?
++----------------------------
++
++Because it makes logins to accounts with thousands of public keys much
++faster.  If you don't have thousands of public keys for a single Unix user,
++you probably have no need for this patch.
++
++It also drastically simplifies the management of SSH keys for access control when
++a more advanced model such as Kerberos cannot be used.
++
++Principle of Operation
++----------------------
++
++The first thing you need to understand is how SSH does key lookups in an
++authorized_keys file.  This work is primarily done in auth-rsa.c and
++auth2-pubkey.c.  When a pubkey authentication method is requested, the
++client presents some information about the key that it wants to authenticate
++with (not the whole key, just a few selected bits of info) along with the
++info that every sort of login needs (username, etc).  The server then opens
++up the user's authorized_keys file and parses that file one line at a time,
++looking for a public key that has the same values for the selected bits of
++info as the key that the client is using.  A challenge/response process is
++then initiated, so that the client can *prove* it's got the correct key, and
++not just the few bits of info it initially presented (which are, after all,
++in the public key as well).
++
++What is particularly important to note here is that (a) the trundling
++through the authorized_keys file is a linear search; and (b) there is enough
++info presented by the client for us to be able to do a near-guaranteed
++unique index search of the available public keys.  The purpose of this patch
++is to do (b).
++
++This patch effectively short-circuits the linear search of the
++authorized_keys file by using the fingerprint of the key that is connecting
++as an index to immediately retrieve the full public key of interest. 
++
++Before a user attempts to authenticate, you have to have the database
++prepared and user keys imported in an appropriate format.  The exact table
++structure is documented in the 'Setup' section, but basically you need to
++create the table and then populate it with keys and their fingerprints.
++
++When a user attempts to authenticate using a public key, the server computes
++the fingerprint of the key that is presented and tries to retrieve all keys
++that match the username and computed index hash.  The usual public key
++challenge/response dance is then performed with each key to guarantee that
++the client has the private key it says it does.
++
++
++Building
++--------
++
++Apply the patch (if you haven't done so already), install the appropriate database
++development libraries and headers, then add the --with-[dbname]-keys option to
++./configure, followed by the usual building commands.
++
++The following databases are supported:
++
++  * MySQL
++    --with-mysql-keys
++  * PostgreSQL
++    --with-postgresql-keys
++
++Setup and Configuration
++-----------------------
++
++The minimum table you need to have created is as follows:
++
++CREATE TABLE public_keys (
++  username VARCHAR(255) NOT NULL,  -- Unix username for the key --
++  options VARCHAR(255),  -- Options for the key --
++  key TEXT NOT NULL,  -- The key itself, exactly as it would be in --
++                      -- authorized_keys, including the key type and ID --
++  fingerprint CHAR(48) NOT NULL  -- Key fingerprint; see below --
++);
++
++CREATE INDEX public_keys_username_fingerprint ON public_keys(username, fingerprint);
++
++Yes, the table and column names are hardcoded.  If you'd like to make them
++all configurable, feel free to extend the patch.
++
++Then you need to tell OpenSSH to use the database as a source of keys, with the
++following options in sshd_config:
++
++UseDatabaseKeys (yes/no): Whether or not to even consider the database as a source of
++	keys.  Default: no
++	
++DatabaseKeystoreDriver (string): The name of the database driver to use.  Options
++  right now are [mysql, postgresql]. No default.
++
++DatabaseKeystoreServer (string): The IP address or hostname of the database server to use. 
++	At present, only one server can be specified.  Default: localhost
++
++DatabaseKeystoreUsername (string): The username to login to the database server with.  No
++	default.
++
++DatabaseKeystorePassword (string): The password to login to the database server with.  No
++	default.
++
++DatabaseKeystoreDatabase (string) The name of the database to use.  No default.
++
++Finally, you need to populate the database with your users.  I leave that as
++an exercise for the reader, with one hint: the fingerprint of a key can be
++obtained with the command "ssh-keygen -l -f <file> | cut -d ' ' -f 2" (or
++equivalent).
++
++
++Operation
++---------
++
++If something appears to be going wrong, check the debug logs -- the patch is
++pretty keen on putting a lot of info in there.  Otherwise there shouldn't
++need to be much on-going maintenance, except to maintain your keys in the
++public_keys table.
++
++
++Questions?
++----------
++
++See Github:
++  http://www.github.com/wingrunr21/OpenSSH-DatabaseKeys
+diff --git a/auth2-pubkey.c b/auth2-pubkey.c
+index 7d21413..aac0a55 100644
+--- a/auth2-pubkey.c
++++ b/auth2-pubkey.c
+@@ -59,6 +59,19 @@
+ #include "authfile.h"
+ #include "match.h"
+ 
++#ifdef WITH_DATABASE_KEYS
++#include <string.h>
++#include "database-keys.h"
++
++#ifdef WITH_MYSQL_KEYS
++#include "mysql-keys.h"
++#endif
++
++#ifdef WITH_POSTGRESQL_KEYS
++#include "postgresql-keys.h"
++#endif
++#endif
++
+ /* import */
+ extern ServerOptions options;
+ extern u_char *session_id2;
+@@ -266,9 +279,82 @@ user_key_allowed2(struct passwd *pw, Key *key, char *file)
+ 	Key *found;
+ 	char *fp;
+ 
++#ifdef WITH_DATABASE_KEYS
++  database_key_t *my_keys;
++  unsigned int i = 0;
++#endif
++
+ 	/* Temporarily use the user's uid. */
+ 	temporarily_use_uid(pw);
+ 
++#ifdef WITH_DATABASE_KEYS
++  if (options.dbkeys_enabled) {
++    found_key = 0;
++    found = key_new(key->type);
++
++    debug("[DBKeys] looking for a key for uid=%s in database", pw->pw_name);
++    if (strcmp(options.dbkeys_driver, "mysql") == 0) 
++    {
++      my_keys = mysql_keys_search(&options, key, pw->pw_name);
++    } 
++    else if (strcmp(options.dbkeys_driver, "postgresql") == 0)
++    {
++      my_keys = postgresql_keys_search(&options, key, pw->pw_name);
++    }
++    
++		if (!(my_keys[0].key)) {
++			fp = key_fingerprint(key, SSH_FP_MD5, SSH_FP_HEX);
++			logit("[DBKeys] no keys found for uid=%s and key fingerprint %s", pw->pw_name, fp);
++			xfree(fp);
++		}
++
++		for (i = 0; !found_key && my_keys[i].key; i++) {
++			char *cp;
++
++			cp = my_keys[i].key;
++			if (key_read(found, &cp) != 1) {
++				debug("[DBKeys] user_key_allowed2: invalid key string %s", my_keys[i].key);
++				continue;
++			}
++
++			/* Copy the key options into a separate buffer that ends with a space,
++			 * otherwise auth_parse_options gets all shirty, because it expects
++			 * the options to be part of a key, not all out on their own, and
++			 * doesn't like a \0-terminated option string.
++			 */
++			if (my_keys[i].options) {
++				int sl;
++				sl = strlen(my_keys[i].options);
++				cp = xmalloc(sl + 2);
++				if (snprintf(cp, sl + 2, "%s ", my_keys[i].options) >= sl + 2) {
++					fatal("Can't happen: snprintf for key options overran buffer!");
++				}
++			} else {
++				cp = NULL;
++			}
++			if (key_equal(found, key) &&
++				auth_parse_options(pw, cp, file, linenum) == 1) {
++					found_key = 1;
++					fp = key_fingerprint(found, SSH_FP_MD5, SSH_FP_HEX);
++					verbose("[DBKeys] Found matching %s key: %s", key_type(found), fp);
++
++					xfree(fp);
++			}
++			if (cp) {
++				xfree(cp);
++			}
++		}
++
++		database_keys_free(my_keys);
++		key_free(found);
++
++		if (found_key) {
++			restore_uid();
++			return found_key;
++		}
++	}
++#endif /* WITH_DATABASE_KEYS */
++
+ 	debug("trying public key file %s", file);
+ 	f = auth_openkeyfile(file, pw, options.strict_modes);
+ 
+diff --git a/config.h.in b/config.h.in
+index e5c9379..d22a678 100644
+--- a/config.h.in
++++ b/config.h.in
+@@ -596,6 +596,15 @@
+ /* Define to 1 if you have the <linux/if_tun.h> header file. */
+ #undef HAVE_LINUX_IF_TUN_H
+ 
++/* Define to 1 if you want database key lookup support. */
++#undef WITH_DATABASE_KEYS
++
++/* Enable MySQL pubkey support */
++#undef WITH_MYSQL_KEYS
++
++/* Enable PostgreSQL pubkey support */
++#undef WITH_POSTGRESQL_KEYS
++
+ /* Define if your libraries define login() */
+ #undef HAVE_LOGIN
+ 
+diff --git a/configure b/configure
+index 73040c5..812a175 100755
+--- a/configure
++++ b/configure
+@@ -1349,6 +1349,8 @@ Optional Packages:
+   --with-tcp-wrappers[=PATH] Enable tcpwrappers support (optionally in PATH)
+   --with-libedit[=PATH]   Enable libedit support for sftp
+   --with-audit=module     Enable audit support (modules=debug,bsm,linux)
++  --with-mysql-keys[=PATH]     Enable MySQL key lookups (optionally with PATH)
++  --with-postgresql-keys[=PATH]     Enable PostgreSQL key lookups (optionally with PATH)
+   --with-ssl-dir=PATH     Specify path to OpenSSL installation
+   --without-openssl-header-check Disable OpenSSL version consistency check
+   --with-ssl-engine       Enable OpenSSL (hardware) ENGINE support
+@@ -3317,7 +3319,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+   ac_cv_header_stdc=no
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -3338,7 +3340,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+   ac_cv_header_stdc=no
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -5158,7 +5160,7 @@ cat >>confdefs.h <<_ACEOF
+ _ACEOF
+ ;;
+ esac
+-rm -f conftest*
++rm -f -r conftest*
+   if test $ac_cv_sys_file_offset_bits = unknown; then
+     { echo "$as_me:$LINENO: checking for _LARGE_FILES value needed for large files" >&5
+ echo $ECHO_N "checking for _LARGE_FILES value needed for large files... $ECHO_C" >&6; }
+@@ -5279,7 +5281,7 @@ cat >>confdefs.h <<_ACEOF
+ _ACEOF
+ ;;
+ esac
+-rm -f conftest*
++rm -f -r conftest*
+   fi
+ fi
+ 
+@@ -12494,7 +12496,7 @@ echo "${ECHO_T}no" >&6; }
+ 
+ 
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ 
+ # Check for g.gl_matchc glob() extension
+@@ -13744,6 +13746,518 @@ echo "$as_me: error: Unknown audit module $withval" >&2;}
+ fi
+ 
+ 
++use_database_keys=0
++
++MYSQL_KEYS_MSG="no"
++
++# Check whether --with-mysql-keys was given.
++if test "${with_mysql_keys+set}" = set; then
++  withval=$with_mysql_keys;
++		if test "x$withval" != "xno" ; then
++			if test "x$withval" != "xyes" ; then
++				CPPFLAGS="$CPPFLAGS -I${withval}/include"
++				LDFLAGS="$LDFLAGS -L${withval}/lib"
++			fi
++
++
++cat >>confdefs.h <<\_ACEOF
++#define WITH_MYSQL_KEYS 1
++_ACEOF
++
++			LIBS="$LIBS -lmysqlclient"
++			MYSQL_KEYS_MSG="yes"
++
++			if test "x$use_database_keys" = "x0"; then
++
++cat >>confdefs.h <<\_ACEOF
++#define WITH_DATABASE_KEYS 1
++_ACEOF
++
++      	use_database_keys=1
++      fi
++
++			if test "${ac_cv_header_mysql_h+set}" = set; then
++  { echo "$as_me:$LINENO: checking for mysql.h" >&5
++echo $ECHO_N "checking for mysql.h... $ECHO_C" >&6; }
++if test "${ac_cv_header_mysql_h+set}" = set; then
++  echo $ECHO_N "(cached) $ECHO_C" >&6
++fi
++{ echo "$as_me:$LINENO: result: $ac_cv_header_mysql_h" >&5
++echo "${ECHO_T}$ac_cv_header_mysql_h" >&6; }
++else
++  # Is the header compilable?
++{ echo "$as_me:$LINENO: checking mysql.h usability" >&5
++echo $ECHO_N "checking mysql.h usability... $ECHO_C" >&6; }
++cat >conftest.$ac_ext <<_ACEOF
++/* confdefs.h.  */
++_ACEOF
++cat confdefs.h >>conftest.$ac_ext
++cat >>conftest.$ac_ext <<_ACEOF
++/* end confdefs.h.  */
++$ac_includes_default
++#include <mysql.h>
++_ACEOF
++rm -f conftest.$ac_objext
++if { (ac_try="$ac_compile"
++case "(($ac_try" in
++  *\"* | *\`* | *\\*) ac_try_echo=\$ac_try;;
++  *) ac_try_echo=$ac_try;;
++esac
++eval "echo \"\$as_me:$LINENO: $ac_try_echo\"") >&5
++  (eval "$ac_compile") 2>conftest.er1
++  ac_status=$?
++  grep -v '^ *+' conftest.er1 >conftest.err
++  rm -f conftest.er1
++  cat conftest.err >&5
++  echo "$as_me:$LINENO: \$? = $ac_status" >&5
++  (exit $ac_status); } && {
++	 test -z "$ac_c_werror_flag" ||
++	 test ! -s conftest.err
++       } && test -s conftest.$ac_objext; then
++  ac_header_compiler=yes
++else
++  echo "$as_me: failed program was:" >&5
++sed 's/^/| /' conftest.$ac_ext >&5
++
++	ac_header_compiler=no
++fi
++
++rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
++{ echo "$as_me:$LINENO: result: $ac_header_compiler" >&5
++echo "${ECHO_T}$ac_header_compiler" >&6; }
++
++# Is the header present?
++{ echo "$as_me:$LINENO: checking mysql.h presence" >&5
++echo $ECHO_N "checking mysql.h presence... $ECHO_C" >&6; }
++cat >conftest.$ac_ext <<_ACEOF
++/* confdefs.h.  */
++_ACEOF
++cat confdefs.h >>conftest.$ac_ext
++cat >>conftest.$ac_ext <<_ACEOF
++/* end confdefs.h.  */
++#include <mysql.h>
++_ACEOF
++if { (ac_try="$ac_cpp conftest.$ac_ext"
++case "(($ac_try" in
++  *\"* | *\`* | *\\*) ac_try_echo=\$ac_try;;
++  *) ac_try_echo=$ac_try;;
++esac
++eval "echo \"\$as_me:$LINENO: $ac_try_echo\"") >&5
++  (eval "$ac_cpp conftest.$ac_ext") 2>conftest.er1
++  ac_status=$?
++  grep -v '^ *+' conftest.er1 >conftest.err
++  rm -f conftest.er1
++  cat conftest.err >&5
++  echo "$as_me:$LINENO: \$? = $ac_status" >&5
++  (exit $ac_status); } >/dev/null && {
++	 test -z "$ac_c_preproc_warn_flag$ac_c_werror_flag" ||
++	 test ! -s conftest.err
++       }; then
++  ac_header_preproc=yes
++else
++  echo "$as_me: failed program was:" >&5
++sed 's/^/| /' conftest.$ac_ext >&5
++
++  ac_header_preproc=no
++fi
++
++rm -f conftest.err conftest.$ac_ext
++{ echo "$as_me:$LINENO: result: $ac_header_preproc" >&5
++echo "${ECHO_T}$ac_header_preproc" >&6; }
++
++# So?  What about this header?
++case $ac_header_compiler:$ac_header_preproc:$ac_c_preproc_warn_flag in
++  yes:no: )
++    { echo "$as_me:$LINENO: WARNING: mysql.h: accepted by the compiler, rejected by the preprocessor!" >&5
++echo "$as_me: WARNING: mysql.h: accepted by the compiler, rejected by the preprocessor!" >&2;}
++    { echo "$as_me:$LINENO: WARNING: mysql.h: proceeding with the compiler's result" >&5
++echo "$as_me: WARNING: mysql.h: proceeding with the compiler's result" >&2;}
++    ac_header_preproc=yes
++    ;;
++  no:yes:* )
++    { echo "$as_me:$LINENO: WARNING: mysql.h: present but cannot be compiled" >&5
++echo "$as_me: WARNING: mysql.h: present but cannot be compiled" >&2;}
++    { echo "$as_me:$LINENO: WARNING: mysql.h:     check for missing prerequisite headers?" >&5
++echo "$as_me: WARNING: mysql.h:     check for missing prerequisite headers?" >&2;}
++    { echo "$as_me:$LINENO: WARNING: mysql.h: see the Autoconf documentation" >&5
++echo "$as_me: WARNING: mysql.h: see the Autoconf documentation" >&2;}
++    { echo "$as_me:$LINENO: WARNING: mysql.h:     section \"Present But Cannot Be Compiled\"" >&5
++echo "$as_me: WARNING: mysql.h:     section \"Present But Cannot Be Compiled\"" >&2;}
++    { echo "$as_me:$LINENO: WARNING: mysql.h: proceeding with the preprocessor's result" >&5
++echo "$as_me: WARNING: mysql.h: proceeding with the preprocessor's result" >&2;}
++    { echo "$as_me:$LINENO: WARNING: mysql.h: in the future, the compiler will take precedence" >&5
++echo "$as_me: WARNING: mysql.h: in the future, the compiler will take precedence" >&2;}
++    ( cat <<\_ASBOX
++## ------------------------------------------- ##
++## Report this to openssh-unix-dev@mindrot.org ##
++## ------------------------------------------- ##
++_ASBOX
++     ) | sed "s/^/$as_me: WARNING:     /" >&2
++    ;;
++esac
++{ echo "$as_me:$LINENO: checking for mysql.h" >&5
++echo $ECHO_N "checking for mysql.h... $ECHO_C" >&6; }
++if test "${ac_cv_header_mysql_h+set}" = set; then
++  echo $ECHO_N "(cached) $ECHO_C" >&6
++else
++  ac_cv_header_mysql_h=$ac_header_preproc
++fi
++{ echo "$as_me:$LINENO: result: $ac_cv_header_mysql_h" >&5
++echo "${ECHO_T}$ac_cv_header_mysql_h" >&6; }
++
++fi
++if test $ac_cv_header_mysql_h = yes; then
++
++
++{ echo "$as_me:$LINENO: checking for mysql_init in -lmysqlclient" >&5
++echo $ECHO_N "checking for mysql_init in -lmysqlclient... $ECHO_C" >&6; }
++if test "${ac_cv_lib_mysqlclient_mysql_init+set}" = set; then
++  echo $ECHO_N "(cached) $ECHO_C" >&6
++else
++  ac_check_lib_save_LIBS=$LIBS
++LIBS="-lmysqlclient  $LIBS"
++cat >conftest.$ac_ext <<_ACEOF
++/* confdefs.h.  */
++_ACEOF
++cat confdefs.h >>conftest.$ac_ext
++cat >>conftest.$ac_ext <<_ACEOF
++/* end confdefs.h.  */
++
++/* Override any GCC internal prototype to avoid an error.
++   Use char because int might match the return type of a GCC
++   builtin and then its argument prototype would still apply.  */
++#ifdef __cplusplus
++extern "C"
++#endif
++char mysql_init ();
++int
++main ()
++{
++return mysql_init ();
++  ;
++  return 0;
++}
++_ACEOF
++rm -f conftest.$ac_objext conftest$ac_exeext
++if { (ac_try="$ac_link"
++case "(($ac_try" in
++  *\"* | *\`* | *\\*) ac_try_echo=\$ac_try;;
++  *) ac_try_echo=$ac_try;;
++esac
++eval "echo \"\$as_me:$LINENO: $ac_try_echo\"") >&5
++  (eval "$ac_link") 2>conftest.er1
++  ac_status=$?
++  grep -v '^ *+' conftest.er1 >conftest.err
++  rm -f conftest.er1
++  cat conftest.err >&5
++  echo "$as_me:$LINENO: \$? = $ac_status" >&5
++  (exit $ac_status); } && {
++	 test -z "$ac_c_werror_flag" ||
++	 test ! -s conftest.err
++       } && test -s conftest$ac_exeext &&
++       $as_test_x conftest$ac_exeext; then
++  ac_cv_lib_mysqlclient_mysql_init=yes
++else
++  echo "$as_me: failed program was:" >&5
++sed 's/^/| /' conftest.$ac_ext >&5
++
++	ac_cv_lib_mysqlclient_mysql_init=no
++fi
++
++rm -f core conftest.err conftest.$ac_objext conftest_ipa8_conftest.oo \
++      conftest$ac_exeext conftest.$ac_ext
++LIBS=$ac_check_lib_save_LIBS
++fi
++{ echo "$as_me:$LINENO: result: $ac_cv_lib_mysqlclient_mysql_init" >&5
++echo "${ECHO_T}$ac_cv_lib_mysqlclient_mysql_init" >&6; }
++if test $ac_cv_lib_mysqlclient_mysql_init = yes; then
++  cat >>confdefs.h <<_ACEOF
++#define HAVE_LIBMYSQLCLIENT 1
++_ACEOF
++
++  LIBS="-lmysqlclient $LIBS"
++
++else
++
++  				    { { echo "$as_me:$LINENO: error: ** Incomplete or missing MySQL libraries **" >&5
++echo "$as_me: error: ** Incomplete or missing MySQL libraries **" >&2;}
++   { (exit 1); exit 1; }; }
++
++
++fi
++
++
++else
++
++				 { { echo "$as_me:$LINENO: error: ** Incomplete or missing MySQL libraries **" >&5
++echo "$as_me: error: ** Incomplete or missing MySQL libraries **" >&2;}
++   { (exit 1); exit 1; }; }
++
++
++fi
++
++
++		fi
++
++
++fi
++
++
++POSTGRESQL_KEYS_MSG="no"
++
++# Check whether --with-postgresql-keys was given.
++if test "${with_postgresql_keys+set}" = set; then
++  withval=$with_postgresql_keys;
++		if test "x$withval" != "xno" ; then
++			if test "x$withval" != "xyes" ; then
++				CPPFLAGS="$CPPFLAGS -I${withval}/include"
++				LDFLAGS="$LDFLAGS -L${withval}/lib"
++			fi
++
++
++cat >>confdefs.h <<\_ACEOF
++#define WITH_POSTGRESQL_KEYS 1
++_ACEOF
++
++			LIBS="$LIBS -lpq"
++			POSTGRESQL_KEYS_MSG="yes"
++
++			if test "x$use_database_keys" = "x0"; then
++
++cat >>confdefs.h <<\_ACEOF
++#define WITH_DATABASE_KEYS 1
++_ACEOF
++
++      	use_database_keys=1
++      fi
++
++			if test "${ac_cv_header_libpq_fe_h+set}" = set; then
++  { echo "$as_me:$LINENO: checking for libpq-fe.h" >&5
++echo $ECHO_N "checking for libpq-fe.h... $ECHO_C" >&6; }
++if test "${ac_cv_header_libpq_fe_h+set}" = set; then
++  echo $ECHO_N "(cached) $ECHO_C" >&6
++fi
++{ echo "$as_me:$LINENO: result: $ac_cv_header_libpq_fe_h" >&5
++echo "${ECHO_T}$ac_cv_header_libpq_fe_h" >&6; }
++else
++  # Is the header compilable?
++{ echo "$as_me:$LINENO: checking libpq-fe.h usability" >&5
++echo $ECHO_N "checking libpq-fe.h usability... $ECHO_C" >&6; }
++cat >conftest.$ac_ext <<_ACEOF
++/* confdefs.h.  */
++_ACEOF
++cat confdefs.h >>conftest.$ac_ext
++cat >>conftest.$ac_ext <<_ACEOF
++/* end confdefs.h.  */
++$ac_includes_default
++#include <libpq-fe.h>
++_ACEOF
++rm -f conftest.$ac_objext
++if { (ac_try="$ac_compile"
++case "(($ac_try" in
++  *\"* | *\`* | *\\*) ac_try_echo=\$ac_try;;
++  *) ac_try_echo=$ac_try;;
++esac
++eval "echo \"\$as_me:$LINENO: $ac_try_echo\"") >&5
++  (eval "$ac_compile") 2>conftest.er1
++  ac_status=$?
++  grep -v '^ *+' conftest.er1 >conftest.err
++  rm -f conftest.er1
++  cat conftest.err >&5
++  echo "$as_me:$LINENO: \$? = $ac_status" >&5
++  (exit $ac_status); } && {
++	 test -z "$ac_c_werror_flag" ||
++	 test ! -s conftest.err
++       } && test -s conftest.$ac_objext; then
++  ac_header_compiler=yes
++else
++  echo "$as_me: failed program was:" >&5
++sed 's/^/| /' conftest.$ac_ext >&5
++
++	ac_header_compiler=no
++fi
++
++rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
++{ echo "$as_me:$LINENO: result: $ac_header_compiler" >&5
++echo "${ECHO_T}$ac_header_compiler" >&6; }
++
++# Is the header present?
++{ echo "$as_me:$LINENO: checking libpq-fe.h presence" >&5
++echo $ECHO_N "checking libpq-fe.h presence... $ECHO_C" >&6; }
++cat >conftest.$ac_ext <<_ACEOF
++/* confdefs.h.  */
++_ACEOF
++cat confdefs.h >>conftest.$ac_ext
++cat >>conftest.$ac_ext <<_ACEOF
++/* end confdefs.h.  */
++#include <libpq-fe.h>
++_ACEOF
++if { (ac_try="$ac_cpp conftest.$ac_ext"
++case "(($ac_try" in
++  *\"* | *\`* | *\\*) ac_try_echo=\$ac_try;;
++  *) ac_try_echo=$ac_try;;
++esac
++eval "echo \"\$as_me:$LINENO: $ac_try_echo\"") >&5
++  (eval "$ac_cpp conftest.$ac_ext") 2>conftest.er1
++  ac_status=$?
++  grep -v '^ *+' conftest.er1 >conftest.err
++  rm -f conftest.er1
++  cat conftest.err >&5
++  echo "$as_me:$LINENO: \$? = $ac_status" >&5
++  (exit $ac_status); } >/dev/null && {
++	 test -z "$ac_c_preproc_warn_flag$ac_c_werror_flag" ||
++	 test ! -s conftest.err
++       }; then
++  ac_header_preproc=yes
++else
++  echo "$as_me: failed program was:" >&5
++sed 's/^/| /' conftest.$ac_ext >&5
++
++  ac_header_preproc=no
++fi
++
++rm -f conftest.err conftest.$ac_ext
++{ echo "$as_me:$LINENO: result: $ac_header_preproc" >&5
++echo "${ECHO_T}$ac_header_preproc" >&6; }
++
++# So?  What about this header?
++case $ac_header_compiler:$ac_header_preproc:$ac_c_preproc_warn_flag in
++  yes:no: )
++    { echo "$as_me:$LINENO: WARNING: libpq-fe.h: accepted by the compiler, rejected by the preprocessor!" >&5
++echo "$as_me: WARNING: libpq-fe.h: accepted by the compiler, rejected by the preprocessor!" >&2;}
++    { echo "$as_me:$LINENO: WARNING: libpq-fe.h: proceeding with the compiler's result" >&5
++echo "$as_me: WARNING: libpq-fe.h: proceeding with the compiler's result" >&2;}
++    ac_header_preproc=yes
++    ;;
++  no:yes:* )
++    { echo "$as_me:$LINENO: WARNING: libpq-fe.h: present but cannot be compiled" >&5
++echo "$as_me: WARNING: libpq-fe.h: present but cannot be compiled" >&2;}
++    { echo "$as_me:$LINENO: WARNING: libpq-fe.h:     check for missing prerequisite headers?" >&5
++echo "$as_me: WARNING: libpq-fe.h:     check for missing prerequisite headers?" >&2;}
++    { echo "$as_me:$LINENO: WARNING: libpq-fe.h: see the Autoconf documentation" >&5
++echo "$as_me: WARNING: libpq-fe.h: see the Autoconf documentation" >&2;}
++    { echo "$as_me:$LINENO: WARNING: libpq-fe.h:     section \"Present But Cannot Be Compiled\"" >&5
++echo "$as_me: WARNING: libpq-fe.h:     section \"Present But Cannot Be Compiled\"" >&2;}
++    { echo "$as_me:$LINENO: WARNING: libpq-fe.h: proceeding with the preprocessor's result" >&5
++echo "$as_me: WARNING: libpq-fe.h: proceeding with the preprocessor's result" >&2;}
++    { echo "$as_me:$LINENO: WARNING: libpq-fe.h: in the future, the compiler will take precedence" >&5
++echo "$as_me: WARNING: libpq-fe.h: in the future, the compiler will take precedence" >&2;}
++    ( cat <<\_ASBOX
++## ------------------------------------------- ##
++## Report this to openssh-unix-dev@mindrot.org ##
++## ------------------------------------------- ##
++_ASBOX
++     ) | sed "s/^/$as_me: WARNING:     /" >&2
++    ;;
++esac
++{ echo "$as_me:$LINENO: checking for libpq-fe.h" >&5
++echo $ECHO_N "checking for libpq-fe.h... $ECHO_C" >&6; }
++if test "${ac_cv_header_libpq_fe_h+set}" = set; then
++  echo $ECHO_N "(cached) $ECHO_C" >&6
++else
++  ac_cv_header_libpq_fe_h=$ac_header_preproc
++fi
++{ echo "$as_me:$LINENO: result: $ac_cv_header_libpq_fe_h" >&5
++echo "${ECHO_T}$ac_cv_header_libpq_fe_h" >&6; }
++
++fi
++if test $ac_cv_header_libpq_fe_h = yes; then
++
++
++{ echo "$as_me:$LINENO: checking for PQconnectdb in -lpq" >&5
++echo $ECHO_N "checking for PQconnectdb in -lpq... $ECHO_C" >&6; }
++if test "${ac_cv_lib_pq_PQconnectdb+set}" = set; then
++  echo $ECHO_N "(cached) $ECHO_C" >&6
++else
++  ac_check_lib_save_LIBS=$LIBS
++LIBS="-lpq  $LIBS"
++cat >conftest.$ac_ext <<_ACEOF
++/* confdefs.h.  */
++_ACEOF
++cat confdefs.h >>conftest.$ac_ext
++cat >>conftest.$ac_ext <<_ACEOF
++/* end confdefs.h.  */
++
++/* Override any GCC internal prototype to avoid an error.
++   Use char because int might match the return type of a GCC
++   builtin and then its argument prototype would still apply.  */
++#ifdef __cplusplus
++extern "C"
++#endif
++char PQconnectdb ();
++int
++main ()
++{
++return PQconnectdb ();
++  ;
++  return 0;
++}
++_ACEOF
++rm -f conftest.$ac_objext conftest$ac_exeext
++if { (ac_try="$ac_link"
++case "(($ac_try" in
++  *\"* | *\`* | *\\*) ac_try_echo=\$ac_try;;
++  *) ac_try_echo=$ac_try;;
++esac
++eval "echo \"\$as_me:$LINENO: $ac_try_echo\"") >&5
++  (eval "$ac_link") 2>conftest.er1
++  ac_status=$?
++  grep -v '^ *+' conftest.er1 >conftest.err
++  rm -f conftest.er1
++  cat conftest.err >&5
++  echo "$as_me:$LINENO: \$? = $ac_status" >&5
++  (exit $ac_status); } && {
++	 test -z "$ac_c_werror_flag" ||
++	 test ! -s conftest.err
++       } && test -s conftest$ac_exeext &&
++       $as_test_x conftest$ac_exeext; then
++  ac_cv_lib_pq_PQconnectdb=yes
++else
++  echo "$as_me: failed program was:" >&5
++sed 's/^/| /' conftest.$ac_ext >&5
++
++	ac_cv_lib_pq_PQconnectdb=no
++fi
++
++rm -f core conftest.err conftest.$ac_objext conftest_ipa8_conftest.oo \
++      conftest$ac_exeext conftest.$ac_ext
++LIBS=$ac_check_lib_save_LIBS
++fi
++{ echo "$as_me:$LINENO: result: $ac_cv_lib_pq_PQconnectdb" >&5
++echo "${ECHO_T}$ac_cv_lib_pq_PQconnectdb" >&6; }
++if test $ac_cv_lib_pq_PQconnectdb = yes; then
++  cat >>confdefs.h <<_ACEOF
++#define HAVE_LIBPQ 1
++_ACEOF
++
++  LIBS="-lpq $LIBS"
++
++else
++
++  				    { { echo "$as_me:$LINENO: error: ** Incomplete or missing PostgreSQL libraries **" >&5
++echo "$as_me: error: ** Incomplete or missing PostgreSQL libraries **" >&2;}
++   { (exit 1); exit 1; }; }
++
++
++fi
++
++
++else
++
++				 { { echo "$as_me:$LINENO: error: ** Incomplete or missing PostgreSQL libraries **" >&5
++echo "$as_me: error: ** Incomplete or missing PostgreSQL libraries **" >&2;}
++   { (exit 1); exit 1; }; }
++
++
++fi
++
++
++		fi
++
++
++fi
++
++
+ 
+ 
+ 
+@@ -24767,7 +25281,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -24812,7 +25326,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -24857,7 +25371,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -24902,7 +25416,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -24947,7 +25461,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -24992,7 +25506,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -25037,7 +25551,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -25082,7 +25596,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -25127,7 +25641,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -25172,7 +25686,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -25217,7 +25731,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -25262,7 +25776,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -25307,7 +25821,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -25352,7 +25866,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -25397,7 +25911,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -25442,7 +25956,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -25487,7 +26001,7 @@ if (eval "$ac_cpp conftest.$ac_ext") 2>&5 |
+ else
+    			eval "$ossh_varname=no"
+ fi
+-rm -f conftest*
++rm -f -r conftest*
+ 
+ fi
+ 
+@@ -31860,7 +32374,7 @@ do
+     cat >>$CONFIG_STATUS <<_ACEOF
+     # First, check the format of the line:
+     cat >"\$tmp/defines.sed" <<\\CEOF
+-/^[	 ]*#[	 ]*undef[	 ][	 ]*$ac_word_re[	 ]*\$/b def
++/^[	 ]*#[	 ]*undef[	 ][	 ]*$ac_word_re[	 ]*/b def
+ /^[	 ]*#[	 ]*define[	 ][	 ]*$ac_word_re[(	 ]/b def
+ b
+ :def
+@@ -31973,6 +32487,8 @@ echo "                   SELinux support: $SELINUX_MSG"
+ echo "                 Smartcard support: $SCARD_MSG"
+ echo "                     S/KEY support: $SKEY_MSG"
+ echo "              TCP Wrappers support: $TCPW_MSG"
++echo "            MySQL keystore support: $MYSQL_KEYS_MSG"
++echo "       PostgreSQL keystore support: $POSTGRESQL_KEYS_MSG"
+ echo "              MD5 password support: $MD5_MSG"
+ echo "                   libedit support: $LIBEDIT_MSG"
+ echo "  Solaris process contract support: $SPC_MSG"
+diff --git a/configure.ac b/configure.ac
+index f23784d..63134f1 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -1422,6 +1422,80 @@ AC_ARG_WITH(audit,
+ 	esac ]
+ )
+ 
++use_database_keys=0
++
++MYSQL_KEYS_MSG="no"
++AC_ARG_WITH(mysql-keys,
++	[  --with-mysql-keys[[=PATH]]     Enable MySQL key lookups (optionally with PATH)],
++	[
++		if test "x$withval" != "xno" ; then
++			if test "x$withval" != "xyes" ; then
++				CPPFLAGS="$CPPFLAGS -I${withval}/include"
++				LDFLAGS="$LDFLAGS -L${withval}/lib"
++			fi
++			
++			AC_DEFINE([WITH_MYSQL_KEYS], 1, [Enable MySQL pubkey support])
++			LIBS="$LIBS -lmysqlclient"
++			MYSQL_KEYS_MSG="yes"
++
++			if test "x$use_database_keys" = "x0"; then
++      	AC_DEFINE([WITH_DATABASE_KEYS], 1, [Enable database pubkey support])
++      	use_database_keys=1
++      fi
++			
++			AC_CHECK_HEADER([mysql.h],
++			  [
++			    AC_CHECK_LIB(mysqlclient, mysql_init,
++            [],
++  			    [
++  				    AC_MSG_ERROR([** Incomplete or missing MySQL libraries **])
++  				  ]
++  			  )
++  			],
++  			[
++				 AC_MSG_ERROR([** Incomplete or missing MySQL libraries **])
++				]
++  		)
++		fi
++	]
++)
++
++POSTGRESQL_KEYS_MSG="no"
++AC_ARG_WITH(postgresql-keys,
++	[  --with-postgresql-keys[[=PATH]]     Enable PostgreSQL key lookups (optionally with PATH)],
++	[
++		if test "x$withval" != "xno" ; then
++			if test "x$withval" != "xyes" ; then
++				CPPFLAGS="$CPPFLAGS -I${withval}/include"
++				LDFLAGS="$LDFLAGS -L${withval}/lib"
++			fi
++			
++			AC_DEFINE([WITH_POSTGRESQL_KEYS], 1, [Enable PostgreSQL pubkey support])
++			LIBS="$LIBS -lpq"
++			POSTGRESQL_KEYS_MSG="yes"
++
++			if test "x$use_database_keys" = "x0"; then
++      	AC_DEFINE([WITH_DATABASE_KEYS], 1, [Enable database pubkey support])
++      	use_database_keys=1
++      fi
++			
++			AC_CHECK_HEADER([libpq-fe.h],
++			  [
++			    AC_CHECK_LIB(pq, PQconnectdb,
++            [],
++  			    [
++  				    AC_MSG_ERROR([** Incomplete or missing PostgreSQL libraries **])
++  				  ]
++  			  )
++  			],
++  			[
++				 AC_MSG_ERROR([** Incomplete or missing PostgreSQL libraries **])
++				]
++  		)
++		fi
++	]
++)
++
+ dnl    Checks for library functions. Please keep in alphabetical order
+ AC_CHECK_FUNCS( \
+ 	arc4random \
+@@ -4319,6 +4393,8 @@ echo "                   SELinux support: $SELINUX_MSG"
+ echo "                 Smartcard support: $SCARD_MSG"
+ echo "                     S/KEY support: $SKEY_MSG"
+ echo "              TCP Wrappers support: $TCPW_MSG"
++echo "            MySQL keystore support: $MYSQL_KEYS_MSG"
++echo "       PostgreSQL keystore support: $POSTGRESQL_KEYS_MSG"
+ echo "              MD5 password support: $MD5_MSG"
+ echo "                   libedit support: $LIBEDIT_MSG"
+ echo "  Solaris process contract support: $SPC_MSG"
+diff --git a/database-keys.c b/database-keys.c
+new file mode 100644
+index 0000000..7435174
+--- /dev/null
++++ b/database-keys.c
+@@ -0,0 +1,53 @@
++/*
++ * Author: Stafford Brunk <stafford.brunk@gmail.com>
++ * Copyright (C) 2011
++ * All Rights Reserved
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. The name of the author may not be used to endorse or promote products
++ *    derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR `AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++#include "includes.h"
++ 
++#ifdef WITH_DATABASE_KEYS
++
++#include "database-keys.h"
++#include "xmalloc.h"
++
++/*
++  Free memory for an array of database_key_t structs
++*/
++void database_keys_free(database_key_t *keys)
++{
++	unsigned int i = 0;
++
++	for (i = 0; keys[i].key; i++) {
++		xfree(keys[i].key);
++
++		if (keys[i].options) {
++			xfree(keys[i].options);
++		}
++	}
++
++	xfree(keys);
++}
++
++#endif
+\ No newline at end of file
+diff --git a/database-keys.h b/database-keys.h
+new file mode 100644
+index 0000000..1b187d7
+--- /dev/null
++++ b/database-keys.h
+@@ -0,0 +1,49 @@
++/*
++ * Author: Stafford Brunk <stafford.brunk@gmail.com>
++ * Copyright (C) 2011
++ * All Rights Reserved
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. The name of the author may not be used to endorse or promote products
++ *    derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR `AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++ 
++#ifndef DATABASE_KEYS_H
++#define DATABASE_KEYS_H
++
++#include "key.h"
++#include "log.h"
++#include "servconf.h"
++
++#define DATABASE_KEYS_ERROR_RETURN  key_list = xmalloc(sizeof(database_key_t)); \
++                                    key_list[0].key = NULL; \
++                                    return key_list;
++                               
++#define KEY_QUERY_TEMPLATE "SELECT public_keys.key,public_keys.options FROM public_keys WHERE username='%s' AND fingerprint='%s'"
++
++typedef struct database_key_s {
++	char   *key;
++	char   *options;
++} database_key_t;
++
++void database_keys_free(database_key_t *);
++
++#endif  /* DATABASE_KEYS_H */
+\ No newline at end of file
+diff --git a/mysql-keys.c b/mysql-keys.c
+new file mode 100644
+index 0000000..50e3818
+--- /dev/null
++++ b/mysql-keys.c
+@@ -0,0 +1,178 @@
++/*
++ * Author: Matt Palmer <mpalmer@engineyard.com>
++ * Copyright (C) 2008 Engineyard Inc.
++ * All Rights Reserved
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. The name of the author may not be used to endorse or promote products
++ *    derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR `AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "includes.h"
++
++#ifdef WITH_MYSQL_KEYS
++
++#include "database-keys.h"
++#include "mysql-keys.h"
++#include "xmalloc.h"
++
++#include <mysql.h>
++#include <errmsg.h>
++#include <stdio.h>
++#include <string.h>
++
++/* Initialise the MySQL connection handle in ServerOptions.  Can be called
++ * multiple times, whenever you want the connection to be recycled.
++ *
++ * We do not guarantee that when you come out of this function that you'll
++ * have a working MySQL connection -- that part we leave up to the caller to
++ * verify that everything is OK for their needs.  We do, however, log a message
++ * so that someone knows why the connection failed.
++ */
++void mysql_keys_init(ServerOptions *opts)
++{
++	debug("[DBKeys] Initialising MySQL connection");
++	
++	/* Cleanup any existing connections */
++  mysql_keys_shutdown();
++	
++	mysql_handle = mysql_init(NULL);
++	
++	if (opts->dbkeys_port < 0)
++	{
++    opts->dbkeys_port = 0;
++	}
++	
++	if (!mysql_real_connect(mysql_handle,
++	                        opts->dbkeys_host,
++	                        opts->dbkeys_user,
++	                        opts->dbkeys_password,
++	                        opts->dbkeys_database,
++	                        opts->dbkeys_port, NULL, 0)) {
++		logit("[DBKeys] Failed to connect to MySQL server %s: %s",
++		      opts->dbkeys_host,
++		      mysql_error(mysql_handle));
++	}
++}
++
++/* Shutdown the MySQL connection. */
++void mysql_keys_shutdown()
++{
++	if (mysql_handle != NULL) {
++	  debug("[DBKeys] Closing MySQL connection");
++		mysql_close(mysql_handle);
++		mysql_handle = NULL;
++	}
++}
++
++/* Perform a search of the database for keys with the fingerprint of the
++ * given key, and returns an array of all of the keys that match (if any).
++ * The array is terminated by an entry with the key set to NULL.
++ */
++database_key_t *mysql_keys_search(ServerOptions *opts, Key *key, char *username)
++{
++	MYSQL_RES *res;
++	MYSQL_ROW row;
++	database_key_t *key_list;
++	char query[1024], *fp, *qfp, *qusername;
++	unsigned int qlen, i;
++	int my_err;
++	
++	debug("SEARCH mysql_handle is NULL %s", mysql_handle == NULL ? "true" : "false");
++	if (!mysql_handle) {
++		mysql_keys_init(opts);
++	}
++	
++	if (mysql_ping(mysql_handle) != 0) {
++		mysql_keys_init(opts);
++		if (mysql_ping(mysql_handle) != 0) {
++			logit("[DBKeys] Connection to the database server failed: %s", mysql_error(mysql_handle));
++			mysql_keys_shutdown();
++			DATABASE_KEYS_ERROR_RETURN
++		}
++	}
++	
++	fp = key_fingerprint(key, SSH_FP_MD5, SSH_FP_HEX);
++	qfp = xmalloc(strlen(fp) * 2 + 1);
++	mysql_real_escape_string(mysql_handle, qfp, fp, strlen(fp));
++	xfree(fp);
++
++	qusername = xmalloc(strlen(username) * 2 + 1);
++	mysql_real_escape_string(mysql_handle, qusername, username, strlen(username));
++
++  /* See macro definition in database-keys.h */
++  qlen = snprintf(query, 1024, KEY_QUERY_TEMPLATE, qusername, qfp);
++
++	if (qlen >= 1024) {
++		xfree(qfp);
++		xfree(qusername);
++		mysql_keys_shutdown();
++		fatal("[DBKeys] The impossible happened... snprintf overflowed my giant buffer!");
++	}
++	
++	xfree(qfp);
++	xfree(qusername);
++
++	debug2("[DBKeys] Going to execute query: '%s'", query);
++	
++	if ((my_err = mysql_real_query(mysql_handle, query, qlen)) != 0) {
++		if ((my_err == CR_SERVER_GONE_ERROR || my_err == CR_SERVER_LOST)) {
++			if (mysql_real_query(mysql_handle, query, qlen) != 0) {
++				error("[DBKeys] Failed to execute query '%s': %s", query, mysql_error(mysql_handle));
++				mysql_keys_shutdown();
++				DATABASE_KEYS_ERROR_RETURN
++			}
++		} else {
++			error("[DBKeys] Failed to execute query '%s': %s", query, mysql_error(mysql_handle));
++			mysql_keys_shutdown();
++			DATABASE_KEYS_ERROR_RETURN
++		}
++	}
++	
++	/* So if we got through the gauntlet of error handling, the query
++	 * must have succeeded, and we can retrieve some results.
++	 */
++	res = mysql_store_result(mysql_handle);
++	
++	if (!res) {
++		error("[DBKeys] Failed to retrieve result set: %s", mysql_error(mysql_handle));
++		mysql_keys_shutdown();
++		DATABASE_KEYS_ERROR_RETURN
++	}
++	
++	debug2("[DBKeys] Query returned %u results", (unsigned int)mysql_num_rows(res));
++	
++	key_list = xmalloc(sizeof(database_key_t) * (mysql_num_rows(res) + 1));
++	for (i = 0; (row = mysql_fetch_row(res)); i++) {
++		key_list[i].key = xstrdup(row[0]);
++		if (row[1]) {
++			key_list[i].options = xstrdup(row[1]);
++		} else {
++			key_list[i].options = NULL;
++		}
++	}
++	key_list[i].key = NULL;
++	
++	mysql_keys_shutdown();
++	return key_list;
++}
++
++#endif  /* WITH_MYSQL_KEYS */
+diff --git a/mysql-keys.h b/mysql-keys.h
+new file mode 100644
+index 0000000..aff6a24
+--- /dev/null
++++ b/mysql-keys.h
+@@ -0,0 +1,44 @@
++/*
++ * Author: Matt Palmer <mpalmer@engineyard.com>
++ * Copyright (C) 2008 Engineyard Inc
++ * All Rights Reserved
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. The name of the author may not be used to endorse or promote products
++ *    derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR `AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef MYSQL_KEYS_H
++#define MYSQL_KEYS_H
++
++#include <mysql.h>
++#include "key.h"
++#include "log.h"
++#include "servconf.h"
++
++static MYSQL *mysql_handle;
++
++void mysql_keys_init(ServerOptions *);
++void mysql_keys_shutdown();
++database_key_t *mysql_keys_search(ServerOptions *, Key *, char *);
++
++#endif  /* MYSQL_KEYS_H */
++	
+diff --git a/postgresql-keys.c b/postgresql-keys.c
+new file mode 100644
+index 0000000..ad58bfb
+--- /dev/null
++++ b/postgresql-keys.c
+@@ -0,0 +1,187 @@
++/*
++ * Author: Matt Palmer <mpalmer@engineyard.com>
++ * Modified: Stafford Brunk <stafford.brunk@gmail.com>
++ * Copyright (C) 2011
++ * All Rights Reserved
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. The name of the author may not be used to endorse or promote products
++ *    derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR `AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "includes.h"
++
++#ifdef WITH_POSTGRESQL_KEYS
++
++#include "database-keys.h"
++#include "postgresql-keys.h"
++#include "xmalloc.h"
++
++#include <libpq-fe.h>
++#include <stdio.h>
++#include <string.h>
++
++#define POSTGRESQL_DEFAULT_PORT 5432
++
++/* Initialise the PostgreSQL connection handle in ServerOptions.  Can be called
++ * multiple times, whenever you want the connection to be recycled.
++ *
++ * We do not guarantee that when you come out of this function that you'll
++ * have a working PostgreSQL connection -- that part we leave up to the caller to
++ * verify that everything is OK for their needs.  We do, however, log a message
++ * so that someone knows why the connection failed.
++ */
++void postgresql_keys_init(ServerOptions *opts)
++{
++  const char *conn_string_template, *conn_string;
++  unsigned int conn_len;
++
++  debug("[DBKeys] Initialising PostgreSQL connection");
++  /* Clean up if there's an existing connection */
++  postgresql_keys_shutdown();
++
++  //Build the connection string
++  conn_string_template = "host = '%s' port = '%u' dbname = '%s' user = '%s' password = '%s' connect_timeout = '10'";
++  conn_string = xmalloc((strlen(opts->dbkeys_host) +
++                    5 + /* Ports are at most 5 digits */
++                    strlen(opts->dbkeys_user) +
++                    strlen(opts->dbkeys_password) +
++                    strlen(opts->dbkeys_database) +
++                    strlen(conn_string_template)) * 2 + 1 );
++                    
++  /* Set port to default port if port number is invalid */
++  if (opts->dbkeys_port <= 0 || opts->dbkeys_port > 65535)
++  {
++    opts->dbkeys_port = POSTGRESQL_DEFAULT_PORT;
++  }
++
++  conn_len = snprintf(conn_string, 1024, conn_string_template, opts->dbkeys_host, \
++                                 ((unsigned int) opts->dbkeys_port), \
++                                 opts->dbkeys_database, \
++                                 opts->dbkeys_user, \
++                                 opts->dbkeys_password);
++
++  if (conn_len >= 1024) {
++    xfree(conn_string);
++    postgresql_keys_shutdown();
++    fatal("[DBKeys] snprintf overflowed the connection string buffer!");
++  }
++
++  //Connect to PostgreSQL
++  postgresql_handle = PQconnectdb(conn_string);
++  if (!postgresql_handle) {
++    logit ("[DBKeys] PQconnectdb returned NULL when connecting to %s", opts->dbkeys_host);
++  }
++  if (PQstatus(postgresql_handle) != CONNECTION_OK) {
++    logit ("[DBKeys] Failed to connect to PostgreSQL server %s: %s", opts->dbkeys_host, PQerrorMessage(postgresql_handle));
++  }
++
++  xfree(conn_string);
++}
++
++/* Shutdown the PostgreSQL connection. */
++void postgresql_keys_shutdown()
++{
++  if (postgresql_handle != NULL) {
++    debug("[DBKeys] Closing PostgreSQL connection");
++    PQfinish(postgresql_handle);
++    postgresql_handle = NULL;
++  }
++}
++
++/* Perform a search of the database for keys with the fingerprint of the
++ * given key, and returns an array of all of the keys that match (if any).
++ * The array is terminated by an entry with the key set to NULL.
++ */
++database_key_t *postgresql_keys_search(ServerOptions *opts, Key *key, char *username)
++{
++  PGresult *res;
++  database_key_t *key_list;
++  char query[1024], *fp, *qfp, *qusername;
++  unsigned int qlen, i;
++  int my_err;
++
++  if (!postgresql_handle) {
++    postgresql_keys_init(opts);
++  }
++
++  if (PQstatus(postgresql_handle) != CONNECTION_OK) {
++    postgresql_keys_init(opts);
++    if (PQstatus(postgresql_handle) != CONNECTION_OK) {
++      logit ("[DBKeys] Failed to connect to PostgreSQL server %s: %s", opts->dbkeys_host, PQerrorMessage(postgresql_handle));
++      postgresql_keys_shutdown();
++      DATABASE_KEYS_ERROR_RETURN
++    }
++  }
++
++  fp = key_fingerprint(key, SSH_FP_MD5, SSH_FP_HEX);
++  qfp = xmalloc(2*strlen(fp) + 1);
++  PQescapeStringConn(postgresql_handle, qfp, fp, strlen(fp), NULL);
++  xfree(fp);
++
++  qusername = xmalloc(2*strlen(username) + 1);
++  PQescapeStringConn(postgresql_handle, qusername, username, strlen(username), NULL);
++
++  /* See macro definition in database-keys.h */
++  qlen = snprintf(query, 1024, KEY_QUERY_TEMPLATE, qusername, qfp);
++  
++  xfree(qfp);
++  xfree(qusername);
++  
++  if (qlen >= 1024) {
++    postgresql_keys_shutdown();
++    fatal("[DBKeys] snprintf overflowed the query string buffer!");
++  }
++
++  debug2("[DBKeys] Going to execute query: '%s'", query);
++  res = PQexec(postgresql_handle, query);
++
++  if (PQresultStatus(res) != PGRES_TUPLES_OK)
++  {
++    error("[DBKeys] Failed to execute query '%s': %s", query, PQerrorMessage(postgresql_handle));
++    PQclear(res);
++    postgresql_keys_shutdown();
++    DATABASE_KEYS_ERROR_RETURN
++  }
++
++  /*
++   * If we got here, query succeeded
++   */
++  debug2("[DBKeys] Query returned %u results", (unsigned int) PQntuples(res));
++
++  key_list = xmalloc(sizeof(database_key_t) * (PQntuples(res) + 1));
++  for (i = 0; i < PQntuples(res); i++)
++  {
++      key_list[i].key = xstrdup(PQgetvalue(res, i, 0));
++      if (!PQgetisnull(res, i, 1)) {
++        key_list[i].options = xstrdup(PQgetvalue(res, i, 1));
++      } else {
++        key_list[i].options = NULL;
++      }
++  }
++  key_list[i].key = NULL;
++  PQclear(res);
++
++  postgresql_keys_shutdown();
++  return key_list;
++}
++
++#endif  /* WITH_POSTGRESQL_KEYS */
+diff --git a/postgresql-keys.h b/postgresql-keys.h
+new file mode 100644
+index 0000000..d2d875b
+--- /dev/null
++++ b/postgresql-keys.h
+@@ -0,0 +1,46 @@
++/*
++ * Author: Matt Palmer <mpalmer@engineyard.com>
++ * Modified: Stafford Brunk <stafford.brunk@gmail.com>
++ * Copyright (C) 2011
++ * All Rights Reserved
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ * 3. The name of the author may not be used to endorse or promote products
++ *    derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR `AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#ifndef POSTGRESQL_KEYS_H
++#define POSTGRESQL_KEYS_H
++
++#include <libpq-fe.h>
++#include "key.h"
++#include "log.h"
++#include "servconf.h"
++#include "database-keys.h"
++
++static PGconn *postgresql_handle;
++
++void postgresql_keys_init(ServerOptions *);
++void postgresql_keys_shutdown();
++database_key_t *postgresql_keys_search(ServerOptions *, Key *, char *);
++
++#endif  /* POSTGRESQL_KEYS_H */
++	
+diff --git a/servconf.c b/servconf.c
+index e2f20a3..6e66950 100644
+--- a/servconf.c
++++ b/servconf.c
+@@ -139,6 +139,15 @@ initialize_server_options(ServerOptions *options)
+ 	options->authorized_principals_file = NULL;
+ 	options->ip_qos_interactive = -1;
+ 	options->ip_qos_bulk = -1;
++#ifdef WITH_DATABASE_KEYS
++  options->dbkeys_enabled = -1;
++  options->dbkeys_driver = NULL;
++  options->dbkeys_host = NULL;
++  options->dbkeys_port = -1;
++  options->dbkeys_user = NULL;
++  options->dbkeys_password = NULL;
++  options->dbkeys_database = NULL;
++#endif
+ }
+ 
+ void
+@@ -295,6 +304,23 @@ fill_default_server_options(ServerOptions *options)
+ 	}
+ #endif
+ 
++#ifdef WITH_DATABASE_KEYS
++  if (options->dbkeys_enabled == -1)
++    options->dbkeys_enabled = 0;
++  if (options->dbkeys_enabled == 1
++      && (!options->dbkeys_host
++      || (options->dbkeys_port < 0)
++      || !options->dbkeys_user
++      || !options->dbkeys_password
++      || !options->dbkeys_database
++      || !options->dbkeys_driver
++      )
++  ) {
++    logit("You asked for database keys, but didn't specify all the options.");
++    options->dbkeys_enabled = 0;
++  }
++#endif
++
+ }
+ 
+ /* Keyword tokens. */
+@@ -329,6 +355,11 @@ typedef enum {
+ 	sRevokedKeys, sTrustedUserCAKeys, sAuthorizedPrincipalsFile,
+ 	sKexAlgorithms, sIPQoS,
+ 	sDeprecated, sUnsupported
++#ifdef WITH_DATABASE_KEYS
++ , sUseDatabaseKeystore, sDatabaseKeystoreDriver, sDatabaseKeystoreServer, 
++  sDatabaseKeystorePort, sDatabaseKeystoreUsername, sDatabaseKeystorePassword,
++  sDatabaseKeystoreDatabase
++#endif
+ } ServerOpCodes;
+ 
+ #define SSHCFG_GLOBAL	0x01	/* allowed in main section of sshd_config */
+@@ -452,6 +483,15 @@ static struct {
+ 	{ "authorizedprincipalsfile", sAuthorizedPrincipalsFile, SSHCFG_ALL },
+ 	{ "kexalgorithms", sKexAlgorithms, SSHCFG_GLOBAL },
+ 	{ "ipqos", sIPQoS, SSHCFG_ALL },
++#ifdef WITH_DATABASE_KEYS
++  { "UseDatabaseKeystore", sUseDatabaseKeystore, SSHCFG_GLOBAL },
++  { "DatabaseKeystoreDriver", sDatabaseKeystoreDriver, SSHCFG_GLOBAL },
++  { "DatabaseKeystoreServer", sDatabaseKeystoreServer, SSHCFG_GLOBAL },
++  { "DatabaseKeystorePort", sDatabaseKeystorePort, SSHCFG_GLOBAL },
++  { "DatabaseKeystoreUsername", sDatabaseKeystoreUsername, SSHCFG_GLOBAL },
++  { "DatabaseKeystorePassword", sDatabaseKeystorePassword, SSHCFG_GLOBAL },
++  { "DatabaseKeystoreDatabase", sDatabaseKeystoreDatabase, SSHCFG_GLOBAL },
++#endif
+ 	{ NULL, sBadOption, 0 }
+ };
+ 
+@@ -1412,6 +1452,56 @@ process_server_config_line(ServerOptions *options, char *line,
+ 		    arg = strdelim(&cp);
+ 		break;
+ 
++#ifdef WITH_DATABASE_KEYS
++  case sUseDatabaseKeystore:
++    intptr = &options->dbkeys_enabled;
++    goto parse_flag;
++    
++  case sDatabaseKeystoreDriver:
++    arg = cp;
++    if (!arg || *arg == '\0')
++      fatal("%s line %d: missing database driver name", filename, linenum);
++    options->dbkeys_driver = xstrdup(arg);
++    memset(arg, 0, strlen(arg));
++    break;
++
++  case sDatabaseKeystoreServer:
++    arg = cp;
++    if (!arg || *arg == '\0')
++      fatal("%s line %d: missing database server name", filename, linenum);
++    options->dbkeys_host = xstrdup(arg);
++    memset(arg, 0, strlen(arg));
++    break;
++    
++  case sDatabaseKeystorePort:
++    intptr = &options->dbkeys_port;
++    goto parse_int;
++
++  case sDatabaseKeystoreUsername:
++    arg = cp;
++    if (!arg || *arg == '\0')
++      fatal("%s line %d: missing database username", filename, linenum);
++    options->dbkeys_user = xstrdup(arg);
++    memset(arg, 0, strlen(arg));
++    break;
++
++  case sDatabaseKeystorePassword:
++    arg = cp;
++    if (!arg || *arg == '\0')
++      fatal("%s line %d: missing database password", filename, linenum);
++    options->dbkeys_password = xstrdup(arg);
++    memset(arg, 0, strlen(arg));
++    break;
++
++  case sDatabaseKeystoreDatabase:
++    arg = cp;
++    if (!arg || *arg == '\0')
++      fatal("%s line %d: missing database name", filename, linenum);
++    options->dbkeys_database = xstrdup(arg);
++    memset(arg, 0, strlen(arg));
++    break;
++#endif /* WITH_DATABASE_KEYS */
++
+ 	default:
+ 		fatal("%s line %d: Missing handler for opcode %s (%d)",
+ 		    filename, linenum, arg, opcode);
+diff --git a/servconf.h b/servconf.h
+index 5a058a4..d52dac4 100644
+--- a/servconf.h
++++ b/servconf.h
+@@ -160,6 +160,15 @@ typedef struct {
+ 	char   *revoked_keys_file;
+ 	char   *trusted_user_ca_keys;
+ 	char   *authorized_principals_file;
++#ifdef WITH_DATABASE_KEYS
++  int     dbkeys_enabled;
++  char   *dbkeys_driver;
++  char   *dbkeys_host;
++  int     dbkeys_port;
++  char   *dbkeys_user;
++  char   *dbkeys_password;
++  char   *dbkeys_database;
++#endif
+ }       ServerOptions;
+ 
+ void	 initialize_server_options(ServerOptions *);
+diff --git a/sshd.c b/sshd.c
+index cb45cec..3adf84e 100644
+--- a/sshd.c
++++ b/sshd.c
+@@ -127,6 +127,19 @@ int allow_severity;
+ int deny_severity;
+ #endif /* LIBWRAP */
+ 
++#ifdef WITH_DATABASE_KEYS
++#include <string.h>
++#include "database-keys.h"
++
++#ifdef WITH_MYSQL_KEYS
++#include "mysql-keys.h"
++#endif
++
++#ifdef WITH_POSTGRESQL_KEYS
++#include "postgresql-keys.h"
++#endif
++#endif
++
+ #ifndef O_NOCTTY
+ #define O_NOCTTY	0
+ #endif
+diff --git a/sshd_config.5 b/sshd_config.5
+index c3d6df3..a2b95e3 100644
+--- a/sshd_config.5
++++ b/sshd_config.5
+@@ -1141,6 +1141,25 @@ Specifies the full pathname of the
+ program.
+ The default is
+ .Pa /usr/X11R6/bin/xauth .
++.It Cm UseDatabaseKeys
++Specifies whether public keys should be looked up in a database (see
++README.database-keys for details). The argument must be
++.Dq yes
++or
++.Dq no .
++.It Cm DatabaseKeystoreDriver
++Specifies the driver to use for database key lookups.  Current choices are: [mysql, postgresql]
++.It Cm DatabaseKeystoreServer
++Specifies the hostname or IP address of the database server to connect to for
++public key lookups.
++.It Cm DatabaseKeystorePort
++Specifies the port to use when connecting to the database server for public key lookups.
++.It Cm DatabaseKeystoreUsername
++The username to use to login to the database server for public key lookups.
++.It Cm DatabaseKeystorePassword
++The password to use to login to the database server for public key lookups.
++.It Cm DatabaseKeystoreDatabase
++The database to use for public key lookups.
+ .El
+ .Sh TIME FORMATS
+ .Xr sshd 8
